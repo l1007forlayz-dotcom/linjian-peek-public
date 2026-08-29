@@ -44,7 +44,7 @@
 
     <application
         android:label="掌心窗"
-        android:icon="@drawable/ic_launcher"
+        android:icon="@drawable/companion_notification_avatar"
         android:theme="@android:style/Theme.Material.Light.NoActionBar"
         android:usesCleartextTraffic="true"
         android:allowBackup="false"
