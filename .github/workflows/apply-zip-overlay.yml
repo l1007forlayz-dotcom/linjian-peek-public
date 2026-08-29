@@ -37,7 +37,7 @@ jobs:
               z.extractall(tmp)
 
           entries = [p for p in tmp.iterdir() if p.name not in [".DS_Store", "__MACOSX"]]
-          if len(entries) == 1 and entries[0].is_dir():
+          if len(entries) == 1 and entries[0].is_dir() and entries[0].name != "android":
               src = entries[0]
           else:
               src = tmp
