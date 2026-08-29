@@ -10,7 +10,6 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
-import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -437,7 +436,6 @@ public class CompanionService extends Service {
                     .setContentTitle(safeTitle)
                     .setContentText(safeMessage)
                     .setSmallIcon(R.drawable.ic_notification_q)
-                    .setLargeIcon(BitmapFactory.decodeResource(ctx.getResources(), R.drawable.companion_notification_avatar))
                     .setContentIntent(pi)
                     .setAutoCancel(true)
                     .setCategory(Notification.CATEGORY_MESSAGE)
