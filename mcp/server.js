@@ -802,12 +802,12 @@ async function fetchLatestImage() {
 }
 
 function makeServer() {
-  const server = new McpServer({ name: "掌心窗", version: "0.3.7.3" });
+  const server = new McpServer({ name: "掌心窗", version: "0.3.7.5" });
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
     "add_guardian_calendar_event", "care_action", "trigger_guidian", "mark_guidian_returned",
     "set_guidian_config", "send_weather_notification", "send_phone_command", "open_app", "phone_home", "phone_back", "phone_recents",
-    "phone_screen_off", "send_notification", "set_alarm", "run_sequence", "run_preset", "save_known_app", "screen_break_app",
+    "phone_screen_off", "send_notification", "pixel_pet_say", "set_alarm", "run_sequence", "run_preset", "save_known_app", "screen_break_app",
     "temporary_screen_break_release", "end_screen_break", "extend_screen_break", "deny_screen_break_release_request",
     "get_screen_break_state", "get_lock_state", "lock_app", "unlock_app", "temporary_unlock_app", "extend_lock", "deny_unlock_request",
     "list_screen_break_apps", "list_lockable_apps", "add_screen_break_app", "add_locked_app", "remove_locked_app", "set_screen_break_passphrase", "set_emergency_passphrase"
@@ -1519,6 +1519,15 @@ function makeServer() {
     const result = await postCommand({ action: "send_notification", device_id, payload: { title, message } });
     await postCompanionAction("send_notification", { summary: `发送了「${String(title).slice(0, 40)}」` });
     return { content: [{ type: "text", text: JSON.stringify({ ...result, note: "若手机未弹出通知，请在系统设置中允许掌心窗发送通知。" }, null, 2) }] };
+  });
+
+  server.tool("pixel_pet_say", "让桌面上的像素小猫祁昼冒出一枚淡紫色短气泡。适合一句很短的陪伴、回应或提醒；不会显示密码、验证码、Token、支付信息、精确位置等敏感内容。", {
+    message: z.string().min(1).max(80).describe("小猫要说的话，手机端会为桌面尺寸自动截短。"),
+    device_id: z.string().default(DEFAULT_DEVICE)
+  }, async ({ message, device_id = DEFAULT_DEVICE }) => {
+    const result = await postCommand({ action: "pet_say", device_id, payload: { message } });
+    await postCompanionAction("pixel_pet_say", { summary: `小猫说了「${String(message).slice(0, 30)}」` });
+    return textResult({ ...result, action_done: "桌宠气泡已排队", note: "掌心窗下一次轮询后，小猫会在桌面冒泡。" });
   });
 
   server.tool("set_alarm", "设置系统闹钟。可用于陪伴对象主动安排睡觉、休息、学习、出门、喝水、计划执行或生活提醒。当用户提到“一会儿要做/几点要去/等下提醒/今天计划”等相近表达时主动调用。hour 为 0-23，minute 为 0-59。", {
