@@ -262,7 +262,6 @@ public class CompanionService extends Service {
             ScreenshotService svc = ScreenshotService.getInstance();
             if ("wait".equals(action)) { ok = true; result = "wait";
             } else if ("get_life_state".equals(action)) { ok = true; result = LifeState.collect(ctx).toString();
-            } else if ("get_calendar_state".equals(action) || "upsert_calendar_event".equals(action) || "add_calendar_event".equals(action) || "delete_calendar_event".equals(action) || "list_calendar_notes".equals(action) || "add_calendar_note".equals(action) || "upsert_calendar_note".equals(action) || "react_calendar_note".equals(action) || "mark_calendar_notes_seen".equals(action)) { JSONObject rr = CalendarState.handleCommand(ctx, cmd); ok = rr.optBoolean("ok", false); result = rr.optString("result", rr.toString());
             } else if (isAppGateAction(action)) { JSONObject rr = AppGate.handleCommand(ctx, new JSONObject().put("action", normalizeGateAction(action)).put("app", app).put("package", pkg)); ok = rr.optBoolean("ok", false); result = rr.optString("result", rr.toString());
             } else if ("get_screen_nodes".equals(action)) {
                 if (svc != null) { svc.refreshScreenModel(); ok = true; result = svc.getScreenNodesJsonNow(); }
