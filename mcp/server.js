@@ -1922,7 +1922,7 @@ function makeServer() {
     return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
   });
 
-  server.tool("send_phone_command", "发送手机控制命令。action 可用 open_app/home/back/recents/screen_off/turn_screen_off/lock_screen/tap/swipe/noop/set_alarm/send_notification/run_sequence/save_known_app/get_screen_nodes/tap_text/input_text，也可用 screen_break_app/end_screen_break/temporary_screen_break_release/extend_screen_break/get_screen_break_state 管理目标 App 的短时屏幕休息；还支持 get_guidian_state/set_guidian_config/trigger_guidian/mark_guidian_returned 归电动作。set_alarm 支持 hour+minute，或 minutes=几分钟后。", {
+  server.tool("send_phone_command", "发送手机控制命令。除常规手机动作外，兼容旧版工具缓存：add_calendar_note 用 title=日期、text=内容；list_calendar_notes 用 title=日期；react_calendar_note 用 target_text=便签ID、message=false 可取消喜欢；get_companion_emotion 读取五维情绪；update_companion_emotion 用 x/y/x1/y1/x2 依次写入想念、嘴硬、心情、焦躁、忙碌。", {
     action: z.string(), app: z.string().default(""), package: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE),
     x: z.number().default(0), y: z.number().default(0), x1: z.number().default(0), y1: z.number().default(0), x2: z.number().default(0), y2: z.number().default(0), duration: z.number().int().default(350),
     target_text: z.string().default(""), text: z.string().default(""), title: z.string().default(""), message: z.string().default(""),
@@ -1931,6 +1931,45 @@ function makeServer() {
   }, async (args) => {
     let outgoing = { ...args };
     const action = String(outgoing.action || "").toLowerCase();
+    if (action === "get_companion_emotion") {
+      return textResult({ ok: true, compatibility_route: "send_phone_command", emotion_state: emotionSnapshot(""), meaning: "数值范围 0~1。" });
+    }
+    if (action === "update_companion_emotion") {
+      const values = {
+        longing: Math.max(0, Math.min(1, Number(outgoing.x || 0))),
+        reserve: Math.max(0, Math.min(1, Number(outgoing.y || 0))),
+        mood: Math.max(0, Math.min(1, Number(outgoing.x1 || 0))),
+        restlessness: Math.max(0, Math.min(1, Number(outgoing.y1 || 0))),
+        busyness: Math.max(0, Math.min(1, Number(outgoing.x2 || 0)))
+      };
+      return textResult({ ok: true, compatibility_route: "send_phone_command", action_done: "情绪惯性已更新", emotion_state: updateEmotion(values, outgoing.message || outgoing.text || "compatibility_update") });
+    }
+    if (action === "add_calendar_note" || action === "list_calendar_notes" || action === "react_calendar_note") {
+      const normalizeDate = (value) => {
+        const match = String(value || "").trim().match(/^(\d{4})[.\/-](\d{1,2})[.\/-](\d{1,2})$/);
+        return match ? `${match[1]}-${match[2].padStart(2, "0")}-${match[3].padStart(2, "0")}` : String(value || "").trim();
+      };
+      if (action === "add_calendar_note") {
+        outgoing.date = normalizeDate(outgoing.title || outgoing.target_text);
+        outgoing.content = String(outgoing.text || outgoing.message || "").trim();
+        outgoing.author = "companion";
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(outgoing.date) || !outgoing.content) return textResult({ ok: false, error: "calendar_note_requires_date_and_content", usage: "title=2026-09-04, text=便签内容" });
+      } else if (action === "list_calendar_notes") {
+        outgoing.date = normalizeDate(outgoing.title || outgoing.target_text || outgoing.text);
+      } else {
+        outgoing.id = String(outgoing.target_text || outgoing.text || outgoing.title || "").trim();
+        outgoing.actor = "companion";
+        outgoing.liked = !/^(false|0|取消|unlike)$/i.test(String(outgoing.message || "true").trim());
+        if (!outgoing.id) return textResult({ ok: false, error: "calendar_note_id_required", usage: "target_text=便签ID" });
+      }
+      outgoing.payload = { ...outgoing };
+      const queued = await postCommand(outgoing);
+      const commandId = queued?.command?.id;
+      const observed = commandId ? await waitCommand(commandId, DEFAULT_COMMAND_WAIT_SECONDS) : null;
+      let phone_result = null;
+      try { phone_result = observed?.command?.result ? JSON.parse(observed.command.result) : null; } catch { phone_result = observed?.command?.result || null; }
+      return textResult({ ok: observed?.command?.status === "completed", compatibility_route: "send_phone_command", queued, observed_status: observed?.command || null, phone_result });
+    }
     const isScreenBreakAction = (action === "screen_break_app" || action === "start_screen_break" || action === "screen_break" || action === "extend_screen_break" || action === "lock_app" || action === "extend_lock");
     if (isScreenBreakAction) {
       // 不把 zod 默认的 minutes=0 传给手机端挡住 duration_minutes。
