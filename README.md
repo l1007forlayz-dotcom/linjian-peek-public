@@ -307,9 +307,10 @@ MCP 详细工具说明见 [docs/mcp.md](docs/mcp.md)。常用工具分组如下�
 - **点击与输入**：`tap_text`、`input_text`、`send_phone_command`、`run_sequence`、`run_preset`。
 - **App 控制**：`open_app`、`phone_home`、`phone_back`、`phone_recents`、`phone_screen_off`、`list_known_apps`、`save_known_app`。
 - **通知与提醒**：`send_notification`、`set_alarm`、`get_weather_state`、`send_weather_notification`。
-- **日历与窗语**：`get_window_whisper`、`set_window_whisper`、`list_guardian_days`、`add_guardian_day`、`update_guardian_day`、`delete_guardian_day`。
+- **日历与窗语**：`get_window_whisper`、`set_window_whisper`、`list_guardian_days`、`add_guardian_day`、`update_guardian_day`、`delete_guardian_day`、`list_calendar_notes`、`add_calendar_note`、`react_calendar_note`。
 - **TA 的日记**：创建/重命名日记本，写入、读取、搜索、更新和删除本机日记；正文不默认上传云端。
-- **归电与关心**：`get_guidian_state`、`set_guidian_config`、`trigger_guidian`、`mark_guidian_returned`、`active_care_check`、`care_action`。
+- **归电与关心**：`get_guidian_state`、`set_guidian_config`、`trigger_guidian`、`mark_guidian_returned`、`active_care_check`、`care_action`。v0.3.8.3 起支持 30 分钟随机判定、未命中概率累积与聊天中防插话。
+- **情绪惯性**：`get_companion_emotion`、`update_companion_emotion` 持久维护想念、嘴硬、心情、焦躁、忙碌五轴状态。
 - **门禁/屏幕休息**：`screen_break_app`、`temporary_screen_break_release`、`end_screen_break`、`extend_screen_break`、`get_screen_break_state`、`list_screen_break_apps`、`add_screen_break_app`、`set_screen_break_passphrase`。
 - **到访与活动**：`record_visit`、`get_last_visit`、`get_visit_history`、`get_visit_stats`、`get_activity_events`、`add_activity_event`、`get_companion_actions`。
 

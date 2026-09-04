@@ -76,6 +76,9 @@ Render 一键部署时，`LINJIAN_URL` 会由 Blueprint 自动引用 server 的�
 ## 守护日历
 
 - `get_guardian_calendar(device_id)`：读取守护日历、最近纪念日、节日、倒数日和横幅提醒状态。
+- `list_calendar_notes(date, device_id, wait_seconds)`：读取全部或指定日期的共同便签。
+- `add_calendar_note(date, content, device_id, wait_seconds)`：由陪伴对象在手机本机日历贴一张共同便签。
+- `react_calendar_note(id, liked, device_id, wait_seconds)`：由陪伴对象喜欢或取消喜欢一张共同便签。
 - `add_guardian_calendar_event(title, date, date_type, repeat_type, group, note, remind_days_before, banner_enabled, device_id, wait_seconds)`：添加或更新重要日期。支持阳历、农历、每年重复、分组、备注和提前提醒。
 - `list_guardian_days(device_id, wait_seconds)`：读取手机本机的完整事件列表和稳定 `id`。
 - `add_guardian_day(...)`：添加事件并返回事件 `id`。
@@ -109,13 +112,15 @@ Render 一键部署时，`LINJIAN_URL` 会由 Blueprint 自动引用 server 的�
 归电用于把用户从目标 App 或手机使用中叫回指定目标应用。公开版目标 App 由用户配置，不写死到私人 App。
 
 - `get_guidian_state(device_id)`：读取归电状态和设置：上次回来、下次最早归电、今日次数、拒绝理由、目标 App、主题等。
-- `set_guidian_config(enabled, interval_minutes, cooldown_minutes, daily_max, quiet_enabled, quiet_start, quiet_end, fullscreen, theme, prompts, quick_reasons, device_id, wait_seconds)`：调整归电设置。
+- `set_guidian_config(enabled, interval_minutes, cooldown_minutes, daily_max, random_enabled, random_check_minutes, quiet_enabled, quiet_start, quiet_end, fullscreen, theme, prompts, quick_reasons, device_id, wait_seconds)`：调整归电设置；随机模式默认每 30 分钟最多判定一次，未命中时想念概率逐步增长。
 - `trigger_guidian(device_id, wait_seconds)`：立刻触发一次归电全屏页，用于测试或主动叫回。
 - `mark_guidian_returned(source, device_id, wait_seconds)`：手动标记用户已经回到归电目标 App。
 
 ## 主动关心策略
 
 - `get_care_policy()`：读取主动关心策略，包括关心开关、风格、允许动作、重点 App、安静时段、冷却时间等。
+- `get_companion_emotion()`：读取会随时间和互动漂移的五轴情绪惯性（想念、嘴硬、心情、焦躁、忙碌）。
+- `update_companion_emotion(...)`：在发生明确互动后更新五轴状态，未传入的轴保持不变。
 - `set_care_policy(active_care_enabled, consent_mode, care_style, allowed_actions, sensitive_apps_json, quiet_start, quiet_end, timezone_offset, repeat_cooldown_minutes, history_limit, notes, policy_json)`：更新主动关心策略。
 - `record_care_event(action, target_app, package, reason, result, tone, device_id)`：记录一次关心动作，避免短时间重复提醒或重复管束。
 - `get_care_history(limit)`：读取最近主动关心记录。

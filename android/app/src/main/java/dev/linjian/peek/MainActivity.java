@@ -135,7 +135,7 @@ public class MainActivity extends Activity {
         loadSettings();
         NowState.start(this);
 
-        DebugState.append(this, "掌心窗公开版 v0.3.7.7 已打开");
+        DebugState.append(this, "掌心窗公开版 v0.3.8.3 已打开");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 13);
         serviceRunning = CompanionService.isRunning();
         updateUI();
@@ -1255,6 +1255,9 @@ public class MainActivity extends Activity {
         String target = String.format(Locale.US, "%04d-%02d-%02d", year, monthIndex + 1, day);
         calendarSelectedTitle.setText((monthIndex + 1) + "月" + day + "日");
         calendarSelectedEventsContainer.removeAllViews();
+        Button addNote = actionButton("＋ 贴一张共同便签", false);
+        addNote.setOnClickListener(v -> showCalendarNoteDialog(target));
+        calendarSelectedEventsContainer.addView(addNote, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(34)));
         int count = 0;
         for (int i = 0; i < upcoming.length(); i++) {
             JSONObject e = upcoming.optJSONObject(i);
@@ -1305,8 +1308,57 @@ public class MainActivity extends Activity {
             }
             calendarSelectedEventsContainer.addView(eventCard);
         }
+        JSONArray notes = CalendarState.notesForDate(this, target);
+        CalendarState.markNotesSeen(this, target);
+        for (int i = 0; i < notes.length(); i++) {
+            JSONObject note = notes.optJSONObject(i);
+            if (note == null) continue;
+            count++;
+            LinearLayout paper = editorialCard();
+            paper.setPadding(dp(12), dp(9), dp(12), dp(9));
+            String author = note.optString("author", "companion");
+            String who = "user".equals(author) ? AppPrefs.userName(this) : AppPrefs.companionName(this);
+            TextView meta = label(who + " 的便签", 8);
+            meta.setTextColor(UITheme.current(this).primary);
+            paper.addView(meta);
+            paper.addView(body(note.optString("content", ""), 10), matchWrapTop(4));
+            LinearLayout reactions = horizontal();
+            reactions.setGravity(Gravity.END);
+            boolean liked = note.optBoolean("liked_by_user", false);
+            Button heart = actionButton(liked ? "♥ 已喜欢" : "♡ 喜欢", false);
+            heart.setTextSize(9);
+            heart.setOnClickListener(v -> {
+                CalendarState.reactSharedNote(this, note.optString("id", ""), "user", !note.optBoolean("liked_by_user", false));
+                updateGuardianCalendarView();
+            });
+            reactions.addView(heart, new LinearLayout.LayoutParams(dp(86), dp(30)));
+            paper.addView(reactions, matchWrapTop(6));
+            calendarSelectedEventsContainer.addView(paper, matchWrapTop(8));
+        }
         calendarSelectedDetail.setVisibility(count == 0 ? View.VISIBLE : View.GONE);
-        calendarSelectedDetail.setText("这一天暂时很安静。\n可以点右上角“＋”把它放进窗边。");
+        calendarSelectedDetail.setText("这一天暂时很安静。\n可以添加日子，也可以留一张只有我们看得见的便签。");
+    }
+
+    private void showCalendarNoteDialog(String date) {
+        final EditText input = new EditText(this);
+        input.setHint("写给祁昼看的话");
+        input.setMinLines(2);
+        input.setMaxLines(5);
+        int pad = dp(18);
+        FrameLayout wrap = new FrameLayout(this);
+        wrap.setPadding(pad, dp(6), pad, 0);
+        wrap.addView(input, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        new AlertDialog.Builder(this)
+                .setTitle("贴一张共同便签")
+                .setMessage(date)
+                .setView(wrap)
+                .setNegativeButton("取消", null)
+                .setPositiveButton("贴上", (d, w) -> {
+                    String content = input.getText().toString().trim();
+                    JSONObject saved = CalendarState.upsertSharedNote(this, "", date, content, "user");
+                    Toast.makeText(this, saved.optBoolean("ok", false) ? "便签贴好了" : "便签没贴上：" + saved.optString("error", "请重试"), Toast.LENGTH_SHORT).show();
+                    updateGuardianCalendarView();
+                }).show();
     }
 
     private static class SpaceCell extends View {
@@ -2250,7 +2302,7 @@ public class MainActivity extends Activity {
         getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE).edit().putBoolean("user_stopped", false).apply(); requestIgnoreBatteryOptimization();
         Intent intent = new Intent(this, CompanionService.class); intent.putExtra("server_url", url); intent.putExtra("token", token);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent); else startService(intent);
-        DebugState.append(this, "已请求启动前台服务：公开版 v0.3.7.7 像素小猫桌宠已启用"); serviceRunning = true; updateUI();
+        DebugState.append(this, "已请求启动前台服务：公开版 v0.3.8.3 像素小猫桌宠已启用"); serviceRunning = true; updateUI();
     }
 
     private void stopCompanionService() { getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE).edit().putBoolean("user_stopped", true).apply(); stopService(new Intent(this, CompanionService.class)); DebugState.append(this, "已停止服务"); serviceRunning = false; updateUI(); }
