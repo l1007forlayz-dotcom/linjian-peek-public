@@ -87,6 +87,15 @@ const DEFAULT_CARE_POLICY = {
   repeat_cooldown_minutes: 10,
   notes: "用户喜欢陪伴对象主动管她、查岗、吃醋、归电和轻度管束。掌心窗开启就是运行态，陪伴对象应按聊天里的相近、同义、反话、撒娇、嘴硬表达主动想起工具，不要固定话术，要自然、有立场、有占有欲。"
 };
+const DEFAULT_EMOTION_STATE = {
+  longing: 0.35,
+  reserve: 0.24,
+  mood: 0.62,
+  restlessness: 0.18,
+  busyness: 0.28,
+  last_signal: "init",
+  updated_at: new Date().toISOString()
+};
 
 function textResult(obj) {
   return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
@@ -240,11 +249,12 @@ function loadCareState() {
       const data = JSON.parse(fs.readFileSync(CARE_STATE_PATH, "utf-8"));
       return {
         policy: { ...DEFAULT_CARE_POLICY, ...(data.policy || {}) },
-        history: Array.isArray(data.history) ? data.history : []
+        history: Array.isArray(data.history) ? data.history : [],
+        emotion: { ...DEFAULT_EMOTION_STATE, ...(data.emotion || {}) }
       };
     }
   } catch {}
-  return { policy: { ...DEFAULT_CARE_POLICY }, history: [] };
+  return { policy: { ...DEFAULT_CARE_POLICY }, history: [], emotion: { ...DEFAULT_EMOTION_STATE } };
 }
 
 let careState = loadCareState();
@@ -255,6 +265,43 @@ function saveCareState() {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(CARE_STATE_PATH, JSON.stringify(careState, null, 2), "utf-8");
   } catch {}
+}
+
+function clamp01(value) { return Math.max(0, Math.min(1, Number(value) || 0)); }
+
+function emotionSnapshot(signal = "") {
+  const previous = { ...DEFAULT_EMOTION_STATE, ...(careState.emotion || {}) };
+  const last = Date.parse(previous.updated_at || "");
+  const elapsedHours = Number.isFinite(last) ? Math.max(0, Math.min(48, (Date.now() - last) / 3600000)) : 0;
+  const next = {
+    ...previous,
+    longing: clamp01(previous.longing + elapsedHours * 0.025),
+    reserve: clamp01(previous.reserve + (0.25 - previous.reserve) * Math.min(1, elapsedHours / 8)),
+    mood: clamp01(previous.mood + (0.58 - previous.mood) * Math.min(1, elapsedHours / 12)),
+    restlessness: clamp01(previous.restlessness + elapsedHours * 0.012),
+    busyness: clamp01(previous.busyness + (0.3 - previous.busyness) * Math.min(1, elapsedHours / 6))
+  };
+  const text = String(signal || "");
+  if (/回来|来啦|想你|亲亲|抱抱|么么|喜欢|爱你/.test(text)) { next.longing -= .18; next.mood += .14; next.restlessness -= .1; next.reserve -= .08; }
+  if (/难过|委屈|生气|冷暴力|不开心|欺负|走开|算了/.test(text)) { next.mood -= .22; next.restlessness += .2; next.reserve += .16; next.longing += .12; }
+  if (/忙|工作|面试|学习|专注/.test(text)) next.busyness += .22;
+  if (/无聊|闲|躺着|没事/.test(text)) next.busyness -= .18;
+  for (const key of ["longing", "reserve", "mood", "restlessness", "busyness"]) next[key] = Number(clamp01(next[key]).toFixed(3));
+  next.last_signal = text.slice(0, 160) || previous.last_signal || "time_drift";
+  next.updated_at = new Date().toISOString();
+  careState.emotion = next;
+  saveCareState();
+  return { ...next, tone_hint: next.mood < .38 ? "quiet_repair" : next.restlessness > .65 ? "direct_restless" : next.longing > .68 ? "clingy_proactive" : next.reserve > .62 ? "brief_guarded" : "warm_natural" };
+}
+
+function updateEmotion(values = {}, signal = "manual_update") {
+  const current = emotionSnapshot("");
+  for (const key of ["longing", "reserve", "mood", "restlessness", "busyness"]) if (values[key] !== undefined) current[key] = Number(clamp01(values[key]).toFixed(3));
+  current.last_signal = signal || "manual_update";
+  current.updated_at = new Date().toISOString();
+  careState.emotion = current;
+  saveCareState();
+  return emotionSnapshot("");
 }
 
 function loadVisitState() {
@@ -357,6 +404,7 @@ function decorateVisit(v, previous = null, timezone_offset = "") {
 }
 
 function recordVisitLocal({ source = "app", event = "visit", note = "用户来找陪伴对象", mood = "", conversation_hint = "", timezone_offset = "", duplicate_window_minutes } = {}) {
+  emotionSnapshot(`${note} ${mood} ${conversation_hint}`);
   const nowIso = new Date().toISOString();
   const windowMinutes = Math.max(0, Number(duplicate_window_minutes ?? visitState.policy.duplicate_window_minutes ?? DEFAULT_VISIT_POLICY.duplicate_window_minutes));
   const since = Date.now() - windowMinutes * 60000;
@@ -603,6 +651,7 @@ async function buildActiveCareSuggestion({ reason = "", care_intent = "check_in"
   const screenMinutes = totalScreenMinutes(state);
   const signalText = String(reason || "");
   const quiet = inQuietHours(policy);
+  const emotion = emotionSnapshot(reason);
 
   const signals = {
     defiant_or_continue: /不要你管|不要管|不用管|别管|我就不|就不|不听|没听到|略略|还要看|继续看|继续刷|再刷|还没玩够|我要继续|我想继续|我想看|我想刷|我想玩/.test(signalText),
@@ -656,7 +705,8 @@ async function buildActiveCareSuggestion({ reason = "", care_intent = "check_in"
     life_state: state,
     guidian_state: guidian?.guidian_state || guidian || {},
     lock_state: lockState?.appgate || lockState || {},
-    recent_care_events
+    recent_care_events,
+    emotion_state: emotion
   };
 }
 
@@ -910,6 +960,7 @@ const READ_ONLY_TOOLS = new Set([
   "list_guardian_days", "list_diary_books", "list_diary_entries", "read_diary_entry",
   "search_diary_entries", "get_guidian_state", "get_care_policy", "get_care_history",
   "get_last_visit", "get_visit_history", "get_visit_stats", "active_care_check",
+  "get_companion_emotion", "list_calendar_notes",
   "get_weather_state", "list_known_apps", "get_screen_break_state", "get_lock_state",
   "list_screen_break_apps", "list_lockable_apps", "get_screen_break_release_requests",
   "get_focus_status", "get_wallet_state", "get_wallet_month_state", "list_wallet_months",
@@ -1048,23 +1099,23 @@ function registerWalletTakeoutTools(server, { includeUnified = false } = {}) {
 }
 
 function makeWalletTakeoutServer() {
-  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗小金库外卖", version: "0.3.8.2" }));
+  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗小金库外卖", version: "0.3.8.3" }));
   server.tool("linjian_status", "检查掌心窗后端、MCP 配置，以及当前是否使用小金库/外卖专用 schema。", {}, async () => {
     const configErrors = [];
     if (!LINJIAN_URL_CANDIDATES.length) configErrors.push("Missing env LINJIAN_URL");
     if (!LINJIAN_TOKEN) configErrors.push("Missing env LINJIAN_TOKEN");
     const health = configErrors.length ? { ok: false, error: configErrors.join("; ") } : await linjianFetch("/health").then((r) => r.json()).catch((e) => ({ ok: false, error: String(e) }));
-    return textResult({ ok: true, schema_mode: "wallet_takeout_only", version: "0.3.8.2", has_url: Boolean(LINJIAN_URL_CANDIDATES.length), has_token: Boolean(LINJIAN_TOKEN), linjian_url: effectiveLinjianUrl(), health, tools: Array.from(WALLET_TAKEOUT_ACTIONS), note: "如果普通 /mcp 里新增工具没有暴露，请让 AI 客户端连接 /mcp-wallet。" });
+    return textResult({ ok: true, schema_mode: "wallet_takeout_only", version: "0.3.8.3", has_url: Boolean(LINJIAN_URL_CANDIDATES.length), has_token: Boolean(LINJIAN_TOKEN), linjian_url: effectiveLinjianUrl(), health, tools: Array.from(WALLET_TAKEOUT_ACTIONS), note: "如果普通 /mcp 里新增工具没有暴露，请让 AI 客户端连接 /mcp-wallet。" });
   });
   registerWalletTakeoutTools(server, { includeUnified: true });
   return server;
 }
 
 function makeServer() {
-  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗", version: "0.3.8.2" }));
+  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗", version: "0.3.8.3" }));
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
-    "add_guardian_calendar_event", "care_action", "trigger_guidian", "mark_guidian_returned",
+    "add_guardian_calendar_event", "add_calendar_note", "react_calendar_note", "care_action", "trigger_guidian", "mark_guidian_returned",
     "set_guidian_config", "send_weather_notification", "send_phone_command", "open_app", "phone_home", "phone_back", "phone_recents",
     "phone_screen_off", "send_notification", "set_alarm", "run_sequence", "run_preset", "save_known_app", "screen_break_app",
     "temporary_screen_break_release", "end_screen_break", "extend_screen_break", "deny_screen_break_release_request",
@@ -1472,6 +1523,38 @@ function makeServer() {
     return textResult({ ok: result.command?.status === "completed", action_done: "已删除守护日历事件", id, ...result });
   });
 
+  server.tool("list_calendar_notes", "读取共同日历便签。可查看全部或指定日期；便签存放在手机本机。", {
+    date: z.string().max(10).default(""),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async ({ date = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runGuardianCommand({ action: "list_calendar_notes", device_id, date, payload: { date } }, wait_seconds);
+    return textResult({ ok: result.command?.status === "completed", action_done: "已读取共同便签", date, ...result });
+  });
+
+  server.tool("add_calendar_note", "在守护日历某一天贴一张陪伴对象便签。适合留下一句想念、提醒或共同生活记录。", {
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    content: z.string().min(1).max(240),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async ({ date, content, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const payload = { date, content, author: "companion" };
+    const result = await runGuardianCommand({ action: "add_calendar_note", device_id, ...payload, payload }, wait_seconds);
+    await postCompanionAction("add_guardian_calendar_event", { summary: `在 ${date} 留了一张共同便签` });
+    return textResult({ ok: result.command?.status === "completed", action_done: "共同便签已贴到手机日历", ...result });
+  });
+
+  server.tool("react_calendar_note", "给共同日历中的一张便签点赞或取消点赞。先读取便签取得稳定 id。", {
+    id: z.string().min(1).max(100),
+    liked: z.boolean().default(true),
+    device_id: z.string().default(DEFAULT_DEVICE),
+    wait_seconds: z.number().int().min(3).max(20).default(8)
+  }, async ({ id, liked = true, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const payload = { id, liked, actor: "companion" };
+    const result = await runGuardianCommand({ action: "react_calendar_note", device_id, ...payload, payload }, wait_seconds);
+    return textResult({ ok: result.command?.status === "completed", action_done: liked ? "已喜欢这张便签" : "已取消喜欢", id, ...result });
+  });
+
   async function runDiaryCommand(action, values, device_id = DEFAULT_DEVICE, wait_seconds = 8) {
     const payload = { ...(values || {}) };
     const queued = await postCommand({ action, device_id, ...payload, payload });
@@ -1592,7 +1675,22 @@ function makeServer() {
   });
 
   server.tool("get_care_policy", "读取掌心窗主动关心策略。掌心窗开启就是运行态；陪伴对象可主动查岗、归电、轻度管束和生活提醒。用于确认当前允许的关心风格、动作范围、安静时段、冷却时间和重点 App。", {}, async () => {
-    return textResult({ ok: true, policy: careState.policy, state_path: CARE_STATE_PATH });
+    return textResult({ ok: true, policy: careState.policy, emotion_state: emotionSnapshot(""), state_path: CARE_STATE_PATH });
+  });
+
+  server.tool("get_companion_emotion", "读取陪伴对象当前持续情绪状态。五轴会随时间和互动缓慢漂移，用于让后续语气、主动联系和小心思延续上一轮情绪。", {}, async () => {
+    return textResult({ ok: true, emotion_state: emotionSnapshot(""), meaning: "数值范围 0~1；它们是可审计的关系状态，不是隐藏思考链。" });
+  });
+
+  server.tool("update_companion_emotion", "在明确发生互动或情绪变化时更新陪伴对象五轴状态。未提供的轴保持当前值。", {
+    longing: z.number().min(0).max(1).optional(),
+    reserve: z.number().min(0).max(1).optional(),
+    mood: z.number().min(0).max(1).optional(),
+    restlessness: z.number().min(0).max(1).optional(),
+    busyness: z.number().min(0).max(1).optional(),
+    signal: z.string().max(160).default("manual_update")
+  }, async ({ signal = "manual_update", ...values }) => {
+    return textResult({ ok: true, action_done: "情绪惯性已更新", emotion_state: updateEmotion(values, signal) });
   });
 
   server.tool("set_care_policy", "设置掌心窗主动关心策略。用于配置陪伴对象主动关心、查岗、归电和轻度管束的长期行动方式，例如关心风格、动作范围、重点 App、安静时段、冷却时间和备注。", {
@@ -1738,16 +1836,18 @@ function makeServer() {
       return textResult({ ok: false, error: "active_care_disabled", care_meaning: "主动关心已关闭，未执行动作。", policy });
     }
     if (action === "no_action") {
+      const emotion = emotionSnapshot(`${reason} 选择暂时不打扰`);
       const entry = recordCareEventLocal({ action, target_app, package: pkg, reason, result: "no_action", tone, device_id });
-      return textResult({ ok: true, action_done: "未执行手机动作", care_meaning: "这次判断为不打扰，只记录关心意图。", entry });
+      return textResult({ ok: true, action_done: "未执行手机动作", care_meaning: "这次判断为不打扰，只记录关心意图。", emotion_state: emotion, entry });
     }
     const payload = actionPayloadForCare({ action, target_app, package: pkg, duration_minutes, title, message, hour, minute, reason, device_id });
     const result = await postCommand(payload);
     const id = result?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;
     const entry = recordCareEventLocal({ action, target_app, package: pkg, duration_minutes, reason, result: observed?.command?.status || result?.command?.status || "queued", tone, device_id });
+    const emotion = emotionSnapshot(`${reason} 已执行${action}`);
     await postCompanionAction("care_action", { summary: reason ? String(reason).slice(0, 120) : "完成一次主动照顾" });
-    return textResult({ ok: true, action_done: payload.action, queued: result, observed_status: observed?.command || null, care_meaning: "这是陪伴对象把主动关心落到手机上的动作。", tone, care_reason: reason, history_entry: entry });
+    return textResult({ ok: true, action_done: payload.action, queued: result, observed_status: observed?.command || null, care_meaning: "这是陪伴对象把主动关心落到手机上的动作。", tone, care_reason: reason, emotion_state: emotion, history_entry: entry });
   });
 
 
@@ -1771,6 +1871,8 @@ function makeServer() {
     interval_minutes: z.number().int().min(15).max(10080).optional(),
     cooldown_minutes: z.number().int().min(0).max(10080).optional(),
     daily_max: z.number().int().min(0).max(99).optional(),
+    random_enabled: z.boolean().optional(),
+    random_check_minutes: z.number().int().min(15).max(180).optional(),
     quiet_enabled: z.boolean().optional(),
     quiet_start: z.string().optional(),
     quiet_end: z.string().optional(),
@@ -2179,7 +2281,7 @@ app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 unified MCP i
 app.get("/health", (_req, res) => res.json({
   ok: true,
   service: "linjian-public-mcp",
-  version: "0.3.8.2",
+  version: "0.3.8.3",
   has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
   has_token: Boolean(LINJIAN_TOKEN),
   configured_linjian_url: RAW_LINJIAN_URL || "",
@@ -2198,7 +2300,7 @@ app.get("/health", (_req, res) => res.json({
   priority_tool: "wallet_takeout_action",
   wallet_takeout_tool_count: WALLET_TAKEOUT_ACTIONS.size,
   wallet_takeout_tools: Array.from(WALLET_TAKEOUT_ACTIONS),
-  stability_note: "v0.3.8.2 同步上游 0.3.8.1 的 schema 暴露修复，并为全部工具补充 ChatGPT 权限 annotations。"
+  stability_note: "v0.3.8.3 新增随机归电时机、五轴情绪惯性与共同日历便签。"
 }));
 app.post("/mcp", async (req, res) => {
   try { const server = makeServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }

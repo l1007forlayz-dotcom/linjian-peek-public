@@ -20,8 +20,9 @@ import java.nio.charset.StandardCharsets;
 
 /** 守护日历：纪念日、节日、倒数日、提前三天横幅提醒，并接入生活状态层。 */
 public class CalendarState {
-    public static final String VERSION = "0.3.7.7";
+    public static final String VERSION = "0.3.8.3";
     public static final String KEY_EVENTS = "guard_calendar_events_json";
+    public static final String KEY_SHARED_NOTES = "guard_calendar_shared_notes_json";
     public static final String THEME_COLOR = "#B8A8D8";
     public static final int DEFAULT_REMIND_DAYS = 3;
 
@@ -80,6 +81,12 @@ public class CalendarState {
             o.put("active_banners", banners);
             o.put("custom_events", customEvents);
             o.put("events", customEvents);
+            JSONArray sharedNotes = sharedNotes(ctx);
+            o.put("shared_notes", sharedNotes);
+            o.put("shared_note_count", sharedNotes.length());
+            int unseen = 0;
+            for (int i = 0; i < sharedNotes.length(); i++) { JSONObject n = sharedNotes.optJSONObject(i); if (n != null && !n.optBoolean("seen_by_user", false)) unseen++; }
+            o.put("unseen_shared_note_count", unseen);
             o.put("summary", summaryLine(ctx));
         } catch (Exception e) {
             try { o.put("error", ScreenshotService.shortMsg(e)); } catch (Exception ignored) { }
@@ -221,6 +228,19 @@ public class CalendarState {
                 String id = cmd.optString("id", "");
                 boolean ok = deleteEvent(ctx, id);
                 out.put("ok", ok).put("result", ok ? "deleted:" + id : "not_found:" + id);
+            } else if ("list_calendar_notes".equals(action)) {
+                String date = safe(cmd.optString("date", ""));
+                JSONArray notes = date.length() == 0 ? sharedNotes(ctx) : notesForDate(ctx, date);
+                out.put("ok", true).put("result", notes.toString()).put("notes", notes);
+            } else if ("add_calendar_note".equals(action) || "upsert_calendar_note".equals(action)) {
+                JSONObject saved = upsertSharedNote(ctx, cmd.optString("id", ""), cmd.optString("date", ""), cmd.optString("content", cmd.optString("comment", "")), cmd.optString("author", "companion"));
+                out.put("ok", saved.optBoolean("ok", false)).put("result", saved.toString()).put("saved", saved);
+            } else if ("react_calendar_note".equals(action)) {
+                JSONObject reacted = reactSharedNote(ctx, cmd.optString("id", ""), cmd.optString("actor", "companion"), cmd.optBoolean("liked", true));
+                out.put("ok", reacted.optBoolean("ok", false)).put("result", reacted.toString()).put("saved", reacted);
+            } else if ("mark_calendar_notes_seen".equals(action)) {
+                int changed = markNotesSeen(ctx, cmd.optString("date", ""));
+                out.put("ok", true).put("result", "seen:" + changed).put("changed", changed);
             } else {
                 out.put("ok", false).put("result", "unknown_calendar_action");
             }
@@ -324,6 +344,83 @@ public class CalendarState {
             if (migrated) saveEvents(ctx, arr);
             return arr;
         } catch (Exception e) { return new JSONArray(); }
+    }
+
+    public static JSONArray sharedNotes(Context ctx) {
+        try {
+            String raw = AppPrefs.get(ctx).getString(KEY_SHARED_NOTES, "[]");
+            return new JSONArray(raw == null || raw.trim().isEmpty() ? "[]" : raw);
+        } catch (Exception e) { return new JSONArray(); }
+    }
+
+    public static JSONArray notesForDate(Context ctx, String date) {
+        JSONArray out = new JSONArray();
+        JSONArray all = sharedNotes(ctx);
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject note = all.optJSONObject(i);
+            if (note != null && safe(date).equals(note.optString("date", ""))) out.put(note);
+        }
+        return out;
+    }
+
+    public static JSONObject upsertSharedNote(Context ctx, String id, String date, String content, String author) {
+        JSONObject out = new JSONObject();
+        try {
+            date = normalizeSolarDate(safe(date), REPEAT_NONE);
+            content = safe(content);
+            author = "user".equalsIgnoreCase(safe(author)) ? "user" : "companion";
+            if (date.length() != 10) return out.put("ok", false).put("error", "bad_note_date");
+            if (content.length() == 0) return out.put("ok", false).put("error", "content_required");
+            if (content.length() > 240) content = content.substring(0, 240);
+            JSONArray all = sharedNotes(ctx);
+            JSONObject note = null;
+            if (id != null && !id.trim().isEmpty()) {
+                for (int i = 0; i < all.length(); i++) { JSONObject candidate = all.optJSONObject(i); if (candidate != null && id.equals(candidate.optString("id", ""))) { note = candidate; break; } }
+            }
+            if (note == null) {
+                note = new JSONObject().put("id", "note_" + UUID.randomUUID().toString()).put("liked_by_user", false).put("liked_by_companion", false);
+                all.put(note);
+            }
+            note.put("date", date).put("content", content).put("author", author).put("updated_at", formatDateTime(System.currentTimeMillis()));
+            note.put("seen_by_user", "user".equals(author));
+            if (!saveSharedNotes(ctx, all)) return out.put("ok", false).put("error", "save_failed");
+            ActivityEventStore.recordPhone(ctx, "calendar_note", "共同便签", ("user".equals(author) ? "我：" : AppPrefs.companionName(ctx) + "：") + content);
+            return out.put("ok", true).put("note", note).put("calendar_state", collect(ctx));
+        } catch (Exception e) { try { return out.put("ok", false).put("error", ScreenshotService.shortMsg(e)); } catch (Exception ignored) { return out; } }
+    }
+
+    public static JSONObject reactSharedNote(Context ctx, String id, String actor, boolean liked) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONArray all = sharedNotes(ctx);
+            for (int i = 0; i < all.length(); i++) {
+                JSONObject note = all.optJSONObject(i);
+                if (note != null && safe(id).equals(note.optString("id", ""))) {
+                    String key = "user".equalsIgnoreCase(safe(actor)) ? "liked_by_user" : "liked_by_companion";
+                    note.put(key, liked).put("updated_at", formatDateTime(System.currentTimeMillis()));
+                    saveSharedNotes(ctx, all);
+                    return out.put("ok", true).put("note", note);
+                }
+            }
+            return out.put("ok", false).put("error", "note_not_found");
+        } catch (Exception e) { try { return out.put("ok", false).put("error", ScreenshotService.shortMsg(e)); } catch (Exception ignored) { return out; } }
+    }
+
+    public static int markNotesSeen(Context ctx, String date) {
+        JSONArray all = sharedNotes(ctx); int changed = 0;
+        try {
+            for (int i = 0; i < all.length(); i++) {
+                JSONObject note = all.optJSONObject(i);
+                if (note != null && (safe(date).isEmpty() || safe(date).equals(note.optString("date", ""))) && !note.optBoolean("seen_by_user", false)) { note.put("seen_by_user", true); changed++; }
+            }
+            if (changed > 0) saveSharedNotes(ctx, all);
+        } catch (Exception ignored) { }
+        return changed;
+    }
+
+    private static boolean saveSharedNotes(Context ctx, JSONArray notes) {
+        try { return AppPrefs.get(ctx).edit().putString(KEY_SHARED_NOTES, notes == null ? "[]" : notes.toString()).commit(); }
+        catch (Exception e) { return false; }
     }
 
     public static JSONObject eventById(Context ctx, String id) {

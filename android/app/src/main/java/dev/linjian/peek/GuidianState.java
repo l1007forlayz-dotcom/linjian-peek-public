@@ -17,6 +17,7 @@ import java.text.SimpleDateFormat;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Random;
 
 /** 掌心窗 · 归电：只存连接状态，不读取聊天内容。 */
 public class GuidianState {
@@ -47,6 +48,13 @@ public class GuidianState {
     public static final String KEY_LAST_DUE_AT = "guidian_last_due_at";
     public static final String KEY_DUE_BUT_NOT_SHOWN = "guidian_due_but_not_shown";
     public static final String KEY_LAST_AUTO_PROMPT_RESULT = "guidian_last_auto_prompt_result";
+    public static final String KEY_RANDOM_ENABLED = "guidian_random_enabled";
+    public static final String KEY_RANDOM_CHECK_MIN = "guidian_random_check_min";
+    public static final String KEY_RANDOM_MISSES = "guidian_random_misses";
+    public static final String KEY_RANDOM_LAST_ROLL_AT = "guidian_random_last_roll_at";
+    public static final String KEY_RANDOM_LAST_PROBABILITY = "guidian_random_last_probability";
+    public static final String KEY_RANDOM_LAST_ROLL = "guidian_random_last_roll";
+    private static final String KEY_RANDOM_MIGRATED = "guidian_random_v1_migrated";
 
     private static final String CHANNEL_ID = "linjian_guidian_call";
     private static final int NOTIFICATION_ID = 2026072301;
@@ -111,6 +119,11 @@ public class GuidianState {
             o.put("last_due_at", lastDueAt <= 0 ? "" : fmt(lastDueAt));
             o.put("due_but_not_shown", p.getBoolean(KEY_DUE_BUT_NOT_SHOWN, false));
             o.put("last_auto_prompt_result", p.getString(KEY_LAST_AUTO_PROMPT_RESULT, ""));
+            o.put("random_enabled", p.getBoolean(KEY_RANDOM_ENABLED, true));
+            o.put("random_check_minutes", randomCheckMinutes(ctx));
+            o.put("random_misses", p.getInt(KEY_RANDOM_MISSES, 0));
+            o.put("random_probability", p.getFloat(KEY_RANDOM_LAST_PROBABILITY, .072f));
+            o.put("random_last_roll", p.getFloat(KEY_RANDOM_LAST_ROLL, -1f));
         } catch (Exception ignored) { }
         return o;
     }
@@ -148,6 +161,7 @@ public class GuidianState {
     public static int intervalMin(Context ctx) { return clamp(prefs(ctx).getInt(KEY_INTERVAL_MIN, 180), 15, 10080); }
     public static int cooldownMin(Context ctx) { return clamp(prefs(ctx).getInt(KEY_COOLDOWN_MIN, 60), 0, 10080); }
     public static int dailyMax(Context ctx) { return clamp(prefs(ctx).getInt(KEY_DAILY_MAX, 3), 0, 99); }
+    public static int randomCheckMinutes(Context ctx) { return clamp(prefs(ctx).getInt(KEY_RANDOM_CHECK_MIN, 30), 15, 180); }
     public static String targetPackage(Context ctx) {
         String fallback = AppPrefs.homeTargetPackage(ctx);
         String pkg = prefs(ctx).getString(KEY_TARGET_PACKAGE, fallback);
@@ -171,6 +185,8 @@ public class GuidianState {
         prefs(ctx).edit()
                 .putLong(KEY_LAST_RETURN_AT, now)
                 .putString(KEY_LAST_RETURN_SOURCE, source == null ? "unknown" : source)
+                .putInt(KEY_RANDOM_MISSES, 0)
+                .putLong(KEY_RANDOM_LAST_ROLL_AT, 0)
                 .apply();
         DebugState.append(ctx, "归电已记录回来：" + (source == null ? "unknown" : source));
         if (!"target_foreground".equals(source))
@@ -207,7 +223,7 @@ public class GuidianState {
 
             JSONObject can = canPrompt(ctx, false);
             if (can.optBoolean("ok")) {
-                JSONObject shown = showPrompt(ctx, false);
+                JSONObject shown = showPromptInternal(ctx, false, true);
                 recordAutoCheck(ctx, now, next, false, "prompt_shown", shown.toString());
                 return;
             }
@@ -234,14 +250,37 @@ public class GuidianState {
             if (!force && now - lastPrompt < cooldownMin(ctx) * 60000L) return o.put("ok", false).put("reason", "cooldown");
             String current = ScreenshotService.currentPackage();
             if (!force && !targetPackage(ctx).isEmpty() && targetPackage(ctx).equals(current)) return o.put("ok", false).put("reason", "already_in_target_app");
+            if (!force && p.getBoolean(KEY_RANDOM_ENABLED, true)) {
+                long lastRollAt = p.getLong(KEY_RANDOM_LAST_ROLL_AT, 0);
+                long rollEvery = randomCheckMinutes(ctx) * 60000L;
+                if (lastRollAt > 0 && now - lastRollAt < rollEvery)
+                    return o.put("ok", false).put("reason", "random_wait").put("next_roll_at_ms", lastRollAt + rollEvery);
+                int misses = clamp(p.getInt(KEY_RANDOM_MISSES, 0), 0, 11);
+                float probability = Math.min(.95f, .072f + misses * .08f);
+                float roll = new Random().nextFloat();
+                SharedPreferences.Editor editor = p.edit()
+                        .putLong(KEY_RANDOM_LAST_ROLL_AT, now)
+                        .putFloat(KEY_RANDOM_LAST_PROBABILITY, probability)
+                        .putFloat(KEY_RANDOM_LAST_ROLL, roll);
+                if (roll > probability) {
+                    editor.putInt(KEY_RANDOM_MISSES, Math.min(11, misses + 1)).apply();
+                    return o.put("ok", false).put("reason", "random_miss").put("probability", probability).put("roll", roll);
+                }
+                editor.putInt(KEY_RANDOM_MISSES, 0).apply();
+                o.put("probability", probability).put("roll", roll);
+            }
             return o.put("ok", true);
         } catch (Exception e) { try { o.put("ok", false).put("reason", ScreenshotService.shortMsg(e)); } catch (Exception ignored) { } return o; }
     }
 
     public static JSONObject showPrompt(Context ctx, boolean force) {
+        return showPromptInternal(ctx, force, false);
+    }
+
+    private static JSONObject showPromptInternal(Context ctx, boolean force, boolean prechecked) {
         JSONObject out = new JSONObject();
         try {
-            JSONObject can = canPrompt(ctx, force);
+            JSONObject can = prechecked ? new JSONObject().put("ok", true) : canPrompt(ctx, force);
             if (!can.optBoolean("ok") && !force) return can;
             String prompt = pickPrompt(ctx);
             SharedPreferences p = prefs(ctx);
@@ -251,6 +290,7 @@ public class GuidianState {
                     .putInt(KEY_TODAY_COUNT, count)
                     .putLong(KEY_LAST_PROMPT_AT, System.currentTimeMillis())
                     .putString(KEY_LAST_PROMPT_TEXT, prompt)
+                    .putInt(KEY_RANDOM_MISSES, 0)
                     .apply();
             Intent i = new Intent(ctx, GuidianActivity.class);
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
@@ -289,6 +329,8 @@ public class GuidianState {
                 if (p.has("theme")) e.putString(KEY_THEME, normalizeTheme(p.optString("theme", "粉色")));
                 if (p.has("prompts")) e.putString(KEY_PROMPTS, p.optString("prompts", defaultPrompts(ctx)));
                 if (p.has("quick_reasons")) e.putString(KEY_REASONS, p.optString("quick_reasons", defaultReasons()));
+                if (p.has("random_enabled")) e.putBoolean(KEY_RANDOM_ENABLED, p.optBoolean("random_enabled", true));
+                if (p.has("random_check_minutes")) e.putInt(KEY_RANDOM_CHECK_MIN, clamp(p.optInt("random_check_minutes", randomCheckMinutes(ctx)), 15, 180));
                 e.apply();
                 DebugState.append(ctx, "归电设置已由 MCP 更新");
                 return config(ctx).put("ok", true).put("result", "guidian_config_saved");
@@ -385,6 +427,13 @@ public class GuidianState {
     private static void ensureInitialized(Context ctx) {
         SharedPreferences p = prefs(ctx);
         if (!p.contains(KEY_LAST_RETURN_AT)) p.edit().putLong(KEY_LAST_RETURN_AT, System.currentTimeMillis()).putString(KEY_LAST_RETURN_SOURCE, "init").apply();
+        if (!p.getBoolean(KEY_RANDOM_MIGRATED, false)) {
+            SharedPreferences.Editor e = p.edit().putBoolean(KEY_RANDOM_MIGRATED, true).putBoolean(KEY_RANDOM_ENABLED, true).putInt(KEY_RANDOM_CHECK_MIN, 30).putBoolean(KEY_QUIET_ENABLED, false);
+            // 180 分钟是旧版默认值。只迁移默认值，保留用户手动设过的其他间隔。
+            if (!p.contains(KEY_INTERVAL_MIN) || p.getInt(KEY_INTERVAL_MIN, 180) == 180) e.putInt(KEY_INTERVAL_MIN, 30);
+            if (!p.contains(KEY_DAILY_MAX) || p.getInt(KEY_DAILY_MAX, 3) == 3) e.putInt(KEY_DAILY_MAX, 8);
+            e.apply();
+        }
     }
 
     private static void resetDailyIfNeeded(Context ctx) {
