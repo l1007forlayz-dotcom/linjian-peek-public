@@ -70,7 +70,6 @@ jobs:
               c = c.replace(needle, repl, 1)
               cs.write_text(c, encoding='utf-8')
           PY
-          git diff --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add android/app/src/main/java/dev/linjian/peek/ScreenshotService.java android/app/src/main/java/dev/linjian/peek/CompanionService.java
