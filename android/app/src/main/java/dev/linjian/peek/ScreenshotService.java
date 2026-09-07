@@ -332,6 +332,34 @@ public class ScreenshotService extends AccessibilityService {
         return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
     }
 
+    public boolean doPath(String pointsJson, long durationMs) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.N) return false;
+        try {
+            JSONArray points = new JSONArray(pointsJson == null ? "[]" : pointsJson);
+            if (points.length() < 2) return false;
+            Path p = new Path();
+            int valid = 0;
+            for (int i = 0; i < points.length(); i++) {
+                JSONArray pair = points.optJSONArray(i);
+                if (pair == null || pair.length() < 2) continue;
+                double dx = pair.optDouble(0, Double.NaN);
+                double dy = pair.optDouble(1, Double.NaN);
+                if (Double.isNaN(dx) || Double.isNaN(dy)) continue;
+                float px = (float) dx;
+                float py = (float) dy;
+                if (valid == 0) p.moveTo(px, py); else p.lineTo(px, py);
+                valid++;
+            }
+            if (valid < 2) return false;
+            GestureDescription.StrokeDescription stroke = new GestureDescription.StrokeDescription(p, 0, Math.max(80, durationMs));
+            return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
+        } catch (Exception e) {
+            DebugState.append(this, "连续轨迹异常：" + shortMsg(e));
+            return false;
+        }
+    }
+    
+
     public void doScreenshot(String serverUrl, String token) {
         if (Build.VERSION.SDK_INT < 30) { DebugState.append(this, "截图失败：Android 版本低于 11"); return; }
         final String finalUrl = normalizeUrl(serverUrl);
