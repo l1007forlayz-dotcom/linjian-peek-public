@@ -28,7 +28,7 @@ public final class PixelPetOverlay {
     private static WindowManager.LayoutParams bubbleParams;
     private static final int PET_WIDTH_DP = 64;
     private static final int PET_HEIGHT_DP = 78;
-    private static final int DOCK_PEEK_DP = 18;
+    private static final int DOCK_PEEK_DP = 32;
     private static final int DOCK_NONE = 0;
     private static final int DOCK_LEFT = -1;
     private static final int DOCK_RIGHT = 1;
