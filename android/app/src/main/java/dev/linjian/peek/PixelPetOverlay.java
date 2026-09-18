@@ -26,6 +26,12 @@ public final class PixelPetOverlay {
     private static WindowManager.LayoutParams params;
     private static BubbleView bubbleView;
     private static WindowManager.LayoutParams bubbleParams;
+    private static final int PET_WIDTH_DP = 64;
+    private static final int PET_HEIGHT_DP = 78;
+    private static final int DOCK_TOUCH_WIDTH_DP = 26;
+    private static final int DOCK_NONE = 0;
+    private static final int DOCK_LEFT = -1;
+    private static final int DOCK_RIGHT = 1;
 
     private PixelPetOverlay() { }
 
@@ -45,7 +51,7 @@ public final class PixelPetOverlay {
             windowManager = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
             petView = new PetView(ctx);
             params = new WindowManager.LayoutParams(
-                    dp(ctx, 64), dp(ctx, 78),
+                    dp(ctx, PET_WIDTH_DP), dp(ctx, PET_HEIGHT_DP),
                     Build.VERSION.SDK_INT >= 26 ? WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY : WindowManager.LayoutParams.TYPE_PHONE,
                     WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE | WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
                     PixelFormat.TRANSLUCENT);
@@ -147,6 +153,7 @@ public final class PixelPetOverlay {
         private int downX, downY;
         private long downAt, lastTapAt, lastTouchAt;
         private boolean dragging, sleeping, blink, wokeOnDown, airborne, running;
+        private int dockSide = DOCK_NONE, dockSideOnDown = DOCK_NONE;
         private long squashUntil;
         private int frame;
         private String[] tapLines = new String[0];
@@ -199,6 +206,7 @@ public final class PixelPetOverlay {
             super.onDraw(c);
             float s = getResources().getDisplayMetrics().density;
             c.save(); if(running && frame%4<2)c.translate(0,-2*s); c.scale(.5f,.5f);
+            if (dockSide == DOCK_RIGHT) c.translate(-54*s, 0);
             if (System.currentTimeMillis()<squashUntil) { c.scale(1.22f,.72f,64*s,130*s); }
             if (sleeping) drawSleepingCat(c, s); else drawAwakeCat(c, s);
             c.restore();
@@ -251,6 +259,11 @@ public final class PixelPetOverlay {
         }
 
         private void updateWander(long idle) {
+            if (dockSide != DOCK_NONE) {
+                running = false;
+                sleeping = idle > 36000L;
+                return;
+            }
             if(dragging || idle<2500L){running=false;sleeping=false;return;}
             long phase=idle%52000L;
             if(phase>36000L){running=false;sleeping=true;return;}
@@ -281,23 +294,76 @@ public final class PixelPetOverlay {
         }
 
         private void moveWindow(){try{wm.updateViewLayout(this,lp);updateBubblePosition(getContext());if(bubbleView!=null)wm.updateViewLayout(bubbleView,bubbleParams);}catch(Exception ignored){}}
-        private void persistPosition(){AppPrefs.get(getContext()).edit().putInt(AppPrefs.KEY_PIXEL_PET_X,lp.x).putInt(AppPrefs.KEY_PIXEL_PET_Y,lp.y).apply();}
+
+        private void persistPosition(){
+            int storedX = lp.x;
+            if (dockSide == DOCK_LEFT) storedX = 0;
+            else if (dockSide == DOCK_RIGHT) storedX = Math.max(0, screenWidth(getContext()) - dp(getContext(), PET_WIDTH_DP));
+            AppPrefs.get(getContext()).edit().putInt(AppPrefs.KEY_PIXEL_PET_X,storedX).putInt(AppPrefs.KEY_PIXEL_PET_Y,lp.y).apply();
+        }
+
+        private void settleToEdge() {
+            int center = lp.x + Math.max(getWidth(), dp(getContext(), PET_WIDTH_DP)) / 2;
+            dockToEdge(center < screenWidth(getContext()) / 2 ? DOCK_LEFT : DOCK_RIGHT);
+        }
+
+        private void dockToEdge(int side) {
+            dockSide = side;
+            lp.width = dp(getContext(), DOCK_TOUCH_WIDTH_DP);
+            lp.x = side == DOCK_LEFT ? 0 : Math.max(0, screenWidth(getContext()) - lp.width);
+            lp.y = Math.max(0, Math.min(screenHeight(getContext()) - getHeight(), lp.y));
+            moveWindow();
+            persistPosition();
+            invalidate();
+        }
+
+        private void undockFromEdge() {
+            if (dockSide == DOCK_NONE) return;
+            int side = dockSide;
+            dockSide = DOCK_NONE;
+            lp.width = dp(getContext(), PET_WIDTH_DP);
+            lp.x = side == DOCK_LEFT
+                    ? dp(getContext(), 4)
+                    : Math.max(0, screenWidth(getContext()) - lp.width - dp(getContext(), 4));
+            moveWindow();
+            invalidate();
+        }
+
+        private boolean shouldFling(MotionEvent e, long now) {
+            float speed = (float)Math.hypot(velocityX, velocityY);
+            float dx = e.getRawX() - downRawX, dy = e.getRawY() - downRawY;
+            float travel = (float)Math.hypot(dx, dy);
+            long velocityAge = Math.max(0L, now - lastMoveAt);
+            long gestureDuration = Math.max(0L, now - downAt);
+            boolean sameDirection = dx * velocityX + dy * velocityY > 0f;
+            return sameDirection
+                    && velocityAge <= 80L
+                    && gestureDuration <= 500L
+                    && speed >= dp(getContext(), 1400)
+                    && travel >= dp(getContext(), 56);
+        }
 
         private void px(Canvas c,float x,float y,float w,float h,int color){ paint.setStyle(Paint.Style.FILL); paint.setColor(color); c.drawRect(x,y,x+w,y+h,paint); }
         private void tri(Canvas c,float x1,float y1,float x2,float y2,float x3,float y3,int color){ android.graphics.Path p=new android.graphics.Path();p.moveTo(x1,y1);p.lineTo(x2,y2);p.lineTo(x3,y3);p.close();paint.setStyle(Paint.Style.FILL);paint.setColor(color);c.drawPath(p,paint); }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
             long now = System.currentTimeMillis();
-            if (e.getAction() == MotionEvent.ACTION_DOWN) {
+            int action = e.getActionMasked();
+            if (action == MotionEvent.ACTION_DOWN) {
+                dockSideOnDown = dockSide;
+                if (dockSideOnDown != DOCK_NONE) undockFromEdge();
                 wokeOnDown=sleeping;
                 airborne=false; running=false; velocityX=velocityY=0;
                 downRawX=e.getRawX(); downRawY=e.getRawY(); downX=lp.x; downY=lp.y; downAt=now; dragging=false;
                 lastRawX=downRawX; lastRawY=downRawY; lastMoveAt=now;
                 lastTouchAt=now; sleeping=false; invalidate(); return true;
             }
-            if (e.getAction() == MotionEvent.ACTION_MOVE) {
+            if (action == MotionEvent.ACTION_MOVE) {
                 long elapsed=Math.max(1,now-lastMoveAt);
-                velocityX=(e.getRawX()-lastRawX)*1000f/elapsed; velocityY=(e.getRawY()-lastRawY)*1000f/elapsed;
+                float instantX=(e.getRawX()-lastRawX)*1000f/elapsed;
+                float instantY=(e.getRawY()-lastRawY)*1000f/elapsed;
+                velocityX=velocityX*.35f+instantX*.65f;
+                velocityY=velocityY*.35f+instantY*.65f;
                 lastRawX=e.getRawX();lastRawY=e.getRawY();lastMoveAt=now;
                 int nx=downX+(int)(e.getRawX()-downRawX), ny=downY+(int)(e.getRawY()-downRawY);
                 if (Math.abs(nx-downX)>dp(getContext(),5)||Math.abs(ny-downY)>dp(getContext(),5)) dragging=true;
@@ -305,11 +371,22 @@ public final class PixelPetOverlay {
                 lp.y=Math.max(0,Math.min(screenHeight(getContext())-getHeight(),ny));
                 moveWindow(); return true;
             }
-            if (e.getAction() == MotionEvent.ACTION_UP || e.getAction() == MotionEvent.ACTION_CANCEL) {
+            if (action == MotionEvent.ACTION_CANCEL) {
+                airborne=false; running=false; velocityX=velocityY=0;
+                if (dragging) settleToEdge();
+                else if (dockSideOnDown != DOCK_NONE) dockToEdge(dockSideOnDown);
+                else persistPosition();
+                dockSideOnDown=DOCK_NONE; dragging=false; lastTouchAt=now;
+                return true;
+            }
+            if (action == MotionEvent.ACTION_UP) {
                 if (dragging) {
-                    float speed=(float)Math.hypot(velocityX,velocityY);
-                    if(speed>dp(getContext(),420)){airborne=true;sleeping=false;say("喂——！");}
-                    else {int middle=screenWidth(getContext())/2;lp.x=(lp.x+getWidth()/2<middle)?dp(getContext(),4):Math.max(0,screenWidth(getContext())-getWidth()-dp(getContext(),4));moveWindow();persistPosition();}
+                    if(shouldFling(e, now)){airborne=true;sleeping=false;say("喂——！");}
+                    else settleToEdge();
+                } else if (dockSideOnDown != DOCK_NONE) {
+                    lastTapAt=0L;
+                    persistPosition();
+                    say("又把我揪出来了。");
                 } else if (now-lastTapAt<360L) {
                     openChatGpt(); lastTapAt=0L;
                 } else {
@@ -320,7 +397,7 @@ public final class PixelPetOverlay {
                     else if(!wokeOnDown && random.nextInt(4)==0 && (hour>=23 || hour<5)) lines=nightLines;
                     say(lines[random.nextInt(lines.length)]);
                 }
-                lastTouchAt=now; return true;
+                dockSideOnDown=DOCK_NONE; dragging=false; lastTouchAt=now; return true;
             }
             return super.onTouchEvent(e);
         }
