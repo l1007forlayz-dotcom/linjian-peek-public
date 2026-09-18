@@ -28,7 +28,7 @@ public final class PixelPetOverlay {
     private static WindowManager.LayoutParams bubbleParams;
     private static final int PET_WIDTH_DP = 64;
     private static final int PET_HEIGHT_DP = 78;
-    private static final int DOCK_TOUCH_WIDTH_DP = 26;
+    private static final int DOCK_PEEK_DP = 18;
     private static final int DOCK_NONE = 0;
     private static final int DOCK_LEFT = -1;
     private static final int DOCK_RIGHT = 1;
@@ -206,7 +206,6 @@ public final class PixelPetOverlay {
             super.onDraw(c);
             float s = getResources().getDisplayMetrics().density;
             c.save(); if(running && frame%4<2)c.translate(0,-2*s); c.scale(.5f,.5f);
-            if (dockSide == DOCK_RIGHT) c.translate(-54*s, 0);
             if (System.currentTimeMillis()<squashUntil) { c.scale(1.22f,.72f,64*s,130*s); }
             if (sleeping) drawSleepingCat(c, s); else drawAwakeCat(c, s);
             c.restore();
@@ -309,8 +308,13 @@ public final class PixelPetOverlay {
 
         private void dockToEdge(int side) {
             dockSide = side;
-            lp.width = dp(getContext(), DOCK_TOUCH_WIDTH_DP);
-            lp.x = side == DOCK_LEFT ? 0 : Math.max(0, screenWidth(getContext()) - lp.width);
+            lp.width = dp(getContext(), PET_WIDTH_DP);
+            lp.height = dp(getContext(), PET_HEIGHT_DP);
+            int fullWidth = dp(getContext(), PET_WIDTH_DP);
+            int peekWidth = dp(getContext(), DOCK_PEEK_DP);
+            lp.x = side == DOCK_LEFT
+                    ? -(fullWidth - peekWidth)
+                    : screenWidth(getContext()) - peekWidth;
             lp.y = Math.max(0, Math.min(screenHeight(getContext()) - getHeight(), lp.y));
             moveWindow();
             persistPosition();
@@ -322,6 +326,7 @@ public final class PixelPetOverlay {
             int side = dockSide;
             dockSide = DOCK_NONE;
             lp.width = dp(getContext(), PET_WIDTH_DP);
+            lp.height = dp(getContext(), PET_HEIGHT_DP);
             lp.x = side == DOCK_LEFT
                     ? dp(getContext(), 4)
                     : Math.max(0, screenWidth(getContext()) - lp.width - dp(getContext(), 4));
