@@ -61,6 +61,8 @@ import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.List;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipOutputStream;
 
 public class MainActivity extends Activity {
     private static final String PREF_A11Y_SETTINGS_OPENED_AT = "a11y_settings_opened_at";
@@ -103,6 +105,7 @@ public class MainActivity extends Activity {
     private static final int REQ_DIARY_COVER = 230724;
     private static final int REQ_DIARY_EXPORT = 230725;
     private static final int REQ_DIARY_IMPORT = 230726;
+    private static final int REQ_DIARY_BATCH_EXPORT = 230727;
     private static boolean openingShownForProcess = false;
     private SoftAvatarView companionAvatarView;
     private ImageView companionRestArt;
@@ -124,7 +127,7 @@ public class MainActivity extends Activity {
     private final Handler uiHandler = new Handler(Looper.getMainLooper());
 
     private final Runnable refreshTick = new Runnable() {
-        @Override public void run() { serviceRunning = CompanionService.isRunning(); updateUI(); uiHandler.postDelayed(this, 1500); }
+        @Override public void run() { serviceRunning = CompanionService.isRunning(); if (!diaryPageOpen) updateUI(); uiHandler.postDelayed(this, 1500); }
     };
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -890,7 +893,7 @@ public class MainActivity extends Activity {
         LinearLayout meta = horizontal(); TextView time = label(entry.optString("time_label", entry.optString("created_at", "").length() >= 16 ? entry.optString("created_at").substring(11, 16) : ""), 8); time.setTextColor(Color.parseColor("#967584")); meta.addView(time, weightedWrap(1f, 0));
         String moodText = entry.optString("mood", "").trim(); TextView mood = label(moodText, 8); if (moodText.isEmpty()) mood.setVisibility(View.GONE); else { mood.setTextColor(Color.parseColor("#9B6E80")); mood.setPadding(dp(8), dp(2), dp(8), dp(2)); GradientDrawable moodBg = new GradientDrawable(); moodBg.setColor(Color.parseColor("#F7E7ED")); moodBg.setCornerRadius(dp(12)); moodBg.setStroke(dp(1), Color.parseColor("#E8CBD6")); mood.setBackground(moodBg); } meta.addView(mood); paper.addView(meta);
         TextView heading = title(entry.optString("title", "没有标题的一页"), 16); heading.setTypeface(Typeface.create("serif", Typeface.BOLD)); heading.setTextColor(Color.parseColor("#513E48")); paper.addView(heading, matchWrapTop(10));
-        TextView content = body(entry.optString("content", ""), 11); content.setTypeface(Typeface.create("serif", Typeface.NORMAL)); content.setTextColor(Color.parseColor("#66535C")); content.setLineSpacing(dp(8), 1f); setDiaryEntryExpanded(content, current); paper.addView(content, matchWrapTop(10));
+        TextView content = body(entry.optString("content", ""), 13); content.setTypeface(Typeface.create("serif", Typeface.NORMAL)); content.setTextColor(Color.parseColor("#66535C")); content.setLineSpacing(dp(6), 1f); setDiaryEntryExpanded(content, current); paper.addView(content, matchWrapTop(10));
         String tags = diaryTagsText(entry.optJSONArray("tags")); if (!tags.isEmpty()) { TextView tagView = body(tags, 8); tagView.setTextColor(Color.parseColor("#A47788")); paper.addView(tagView, matchWrapTop(14)); }
         TextView expandHint = label(current ? "收起全文  ↑" : "点击展开全文  ↓", 8); expandHint.setTextColor(Color.parseColor("#A47788")); paper.addView(expandHint, matchWrapTop(11));
         if (current) { diaryExpandedPaperView = paper; diaryExpandedContentView = content; diaryExpandedHintView = expandHint; }
@@ -918,7 +921,7 @@ public class MainActivity extends Activity {
         diaryExpandedPaperView = expanding ? paper : null;
         diaryExpandedContentView = expanding ? content : null;
         diaryExpandedHintView = expanding ? hint : null;
-        content.setAlpha(.35f); content.animate().alpha(1f).setDuration(180).start();
+        
         paper.requestLayout();
     }
 
@@ -948,8 +951,8 @@ public class MainActivity extends Activity {
     }
 
     private void showDiaryMoreMenu() {
-        String[] items = new String[]{"添加日记", "重命名日记本", "更换封面", "删除当前日记", "删除整个日记本"};
-        new AlertDialog.Builder(this).setTitle("更多").setItems(items, (d, which) -> { if (which == 0) showAddDiaryEntryDialog(); else if (which == 1) showRenameDiaryBookDialog(); else if (which == 2) showDiaryCoverMenu(); else if (which == 3) confirmDeleteDiaryEntry(); else confirmDeleteDiaryBookFirst(); }).show();
+        String[] items = new String[]{"添加日记", "批量导出本日记本", "重命名日记本", "更换封面", "删除当前日记", "删除整个日记本"};
+        new AlertDialog.Builder(this).setTitle("更多").setItems(items, (d, which) -> { if (which == 0) showAddDiaryEntryDialog(); else if (which == 1) chooseDiaryBatchExport(); else if (which == 2) showRenameDiaryBookDialog(); else if (which == 3) showDiaryCoverMenu(); else if (which == 4) confirmDeleteDiaryEntry(); else confirmDeleteDiaryBookFirst(); }).show();
     }
 
     private void showAddDiaryEntryDialog() {
@@ -1404,7 +1407,12 @@ public class MainActivity extends Activity {
             canvas.drawRoundRect(page, dp(16), dp(16), paint); paint.setShader(null);
 
             paint.setStrokeWidth(dp(.6f)); paint.setColor(Color.parseColor("#E8DCE2")); paint.setAlpha(108);
-            for (float y = page.top + dp(47); y < page.bottom - dp(13); y += dp(26)) canvas.drawLine(page.left + dp(24), y, page.right - dp(13), y, paint);
+            android.graphics.Rect clip = canvas.getClipBounds();
+            float step = dp(26);
+            float firstLine = page.top + dp(47);
+            float firstVisible = firstLine + Math.max(0, (int)((clip.top - firstLine) / step)) * step;
+            for (float y = firstVisible; y < Math.min(page.bottom - dp(13), clip.bottom); y += step)
+                canvas.drawLine(page.left + dp(24), y, page.right - dp(13), y, paint);
             paint.setStrokeWidth(dp(.8f)); paint.setColor(Color.parseColor("#E9C6D2")); paint.setAlpha(88);
             canvas.drawLine(page.left + dp(17), page.top + dp(14), page.left + dp(17), page.bottom - dp(14), paint);
 
@@ -1748,7 +1756,7 @@ public class MainActivity extends Activity {
             String normalizedTargets = AppPrefs.normalizeTargetApps(targetAppsInput.getText().toString());
             e.putString(AppPrefs.KEY_TARGET_APPS, normalizedTargets);
             StringBuilder packages = new StringBuilder();
-            for (String line : normalizedTargets.split("\\n")) {
+            for (String line : normalizedTargets.split("\n")) {
                 String[] parts = line.split("\\|", 2);
                 if (parts.length == 2 && AppPrefs.isPackageLike(parts[1].trim())) {
                     if (packages.length() > 0) packages.append(',');
@@ -2276,6 +2284,50 @@ public class MainActivity extends Activity {
         } catch (Exception e) { Toast.makeText(this, "系统文件管理器没有接住导出", Toast.LENGTH_SHORT).show(); }
     }
 
+    private void chooseDiaryBatchExport() {
+        if (DiaryState.listEntries(this, diaryBookId).length() == 0) {
+            Toast.makeText(this, "这本日记还没有内容", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        try {
+            Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+            i.setType("application/zip");
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.putExtra(Intent.EXTRA_TITLE, "掌心窗-日记批量导出-" + new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date()) + ".zip");
+            startActivityForResult(i, REQ_DIARY_BATCH_EXPORT);
+        } catch (Exception e) { Toast.makeText(this, "无法打开文件保存位置", Toast.LENGTH_SHORT).show(); }
+    }
+
+    private void exportDiaryBatchTo(Uri uri) {
+        final String bookId = diaryBookId;
+        new Thread(() -> {
+            int count = 0;
+            try (OutputStream output = getContentResolver().openOutputStream(uri, "wt")) {
+                if (output == null) throw new IllegalStateException("output_unavailable");
+                try (ZipOutputStream zip = new ZipOutputStream(output)) {
+                    JSONArray entries = DiaryState.listEntries(this, bookId);
+                    for (int i = 0; i < entries.length(); i++) {
+                        JSONObject entry = entries.optJSONObject(i);
+                        if (entry == null) continue;
+                        String date = entry.optString("date", "无日期").replaceAll("[^0-9-]", "_");
+                        String title = entry.optString("title", "日记").replaceAll("[\\\\/:*?\"<>|\\p{Cntrl}]", "_");
+                        if (title.length() > 40) title = title.substring(0, 40);
+                        zip.putNextEntry(new ZipEntry(String.format(Locale.US, "%03d_%s_%s.txt", i + 1, date, title)));
+                        String text = entry.optString("date", "") + "  " + entry.optString("time_label", "") + "\n"
+                                + entry.optString("title", "") + "\n\n" + entry.optString("content", "") + "\n";
+                        zip.write(text.getBytes(StandardCharsets.UTF_8));
+                        zip.closeEntry();
+                        count++;
+                    }
+                }
+                final int exported = count;
+                runOnUiThread(() -> Toast.makeText(this, "已导出 " + exported + " 篇日记", Toast.LENGTH_LONG).show());
+            } catch (Exception e) {
+                runOnUiThread(() -> Toast.makeText(this, "批量导出失败：" + ScreenshotService.shortMsg(e), Toast.LENGTH_LONG).show());
+            }
+        }).start();
+    }
+
     private void chooseDiaryImport() {
         try {
             Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -2317,6 +2369,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "日记本封面已换好", Toast.LENGTH_SHORT).show(); showDiaryHomePage();
         } else if (requestCode == REQ_DIARY_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null) exportDiaryTo(data.getData());
         else if (requestCode == REQ_DIARY_IMPORT && resultCode == RESULT_OK && data != null && data.getData() != null) importDiaryFrom(data.getData());
+        else if (requestCode == REQ_DIARY_BATCH_EXPORT && resultCode == RESULT_OK && data != null && data.getData() != null) exportDiaryBatchTo(data.getData());
     }
 
     private void startCompanionService() {
