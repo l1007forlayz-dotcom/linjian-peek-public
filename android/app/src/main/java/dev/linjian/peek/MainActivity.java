@@ -747,14 +747,39 @@ public class MainActivity extends Activity {
 
         JSONArray entries = searchResults == null ? DiaryState.listEntries(this, diaryBookId) : searchResults;
         if (!diarySelectedDate.isEmpty() && searchResults == null) root.addView(buildDiaryDatePageHeader(entries), marginBottom(8));
-        int shown = 0; String lastDate = "";
-        for (int i = 0; i < entries.length(); i++) {
-            JSONObject entry = entries.optJSONObject(i); if (entry == null) continue;
-            String date = entry.optString("date", ""); if (!diarySelectedDate.isEmpty() && !diarySelectedDate.equals(date)) continue;
-            if (!date.equals(lastDate) && diarySelectedDate.isEmpty()) { TextView day = label(date, 10); day.setPadding(dp(5), dp(7), 0, dp(3)); root.addView(day); lastDate = date; }
-            root.addView(searchResults == null ? buildDiaryEntryPaper(entry) : buildDiarySearchResultCard(entry), marginBottom(10)); shown++;
-        }
-        if (shown == 0) {
+        LinearLayout pages = new LinearLayout(this);
+        pages.setOrientation(LinearLayout.VERTICAL);
+        root.addView(pages);
+        int[] cursor = {0};
+        int[] shown = {0};
+        String[] lastDate = {""};
+        Button loadMore = actionButton("继续翻阅  ↓", false);
+        Runnable appendPage = () -> {
+            int added = 0;
+            while (cursor[0] < entries.length() && added < 10) {
+                JSONObject entry = entries.optJSONObject(cursor[0]++);
+                if (entry == null) continue;
+                String date = entry.optString("date", "");
+                if (!diarySelectedDate.isEmpty() && !diarySelectedDate.equals(date)) continue;
+                if (!date.equals(lastDate[0]) && diarySelectedDate.isEmpty()) {
+                    TextView day = label(date, 10);
+                    day.setPadding(dp(5), dp(7), 0, dp(3));
+                    pages.addView(day);
+                    lastDate[0] = date;
+                }
+                pages.addView(searchResults == null ? buildDiaryEntryPaper(entry) : buildDiarySearchResultCard(entry), marginBottom(10));
+                shown[0]++;
+                added++;
+            }
+            loadMore.setVisibility(cursor[0] < entries.length() ? View.VISIBLE : View.GONE);
+        };
+        loadMore.setOnClickListener(v -> appendPage.run());
+        // A direct jump to an older entry must reveal its page.
+        if (!diaryCurrentEntryId.isEmpty() && searchResults == null) {
+            while (cursor[0] < entries.length() && diaryExpandedPaperView == null) appendPage.run();
+        } else appendPage.run();
+        root.addView(loadMore, marginBottom(10));
+        if (shown[0] == 0) {
             LinearLayout empty = editorialCard(); empty.setGravity(Gravity.CENTER); empty.setPadding(dp(20), dp(30), dp(20), dp(30));
             String text = searchResults != null ? "没有找到写着这些词的纸页。" : (!diarySelectedDate.isEmpty() ? "这一天还没有留下文字。" : "日记本还是空白的。\nTA 可以通过 MCP 把今天轻轻写下来。");
             TextView emptyText = body(text, 10); emptyText.setGravity(Gravity.CENTER); emptyText.setLineSpacing(dp(4), 1f); empty.addView(emptyText); root.addView(empty);
