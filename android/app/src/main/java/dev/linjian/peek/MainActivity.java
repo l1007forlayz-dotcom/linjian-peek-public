@@ -759,7 +759,7 @@ public class MainActivity extends Activity {
         Button loadMore = actionButton("继续翻阅  ↓", false);
         Runnable appendPage = () -> {
             int added = 0;
-            while (cursor[0] < entries.length() && added < 10) {
+            while (cursor[0] < entries.length() && added < 6) {
                 JSONObject entry = entries.optJSONObject(cursor[0]++);
                 if (entry == null) continue;
                 String date = entry.optString("date", "");
@@ -893,13 +893,20 @@ public class MainActivity extends Activity {
         LinearLayout meta = horizontal(); TextView time = label(entry.optString("time_label", entry.optString("created_at", "").length() >= 16 ? entry.optString("created_at").substring(11, 16) : ""), 8); time.setTextColor(Color.parseColor("#967584")); meta.addView(time, weightedWrap(1f, 0));
         String moodText = entry.optString("mood", "").trim(); TextView mood = label(moodText, 8); if (moodText.isEmpty()) mood.setVisibility(View.GONE); else { mood.setTextColor(Color.parseColor("#9B6E80")); mood.setPadding(dp(8), dp(2), dp(8), dp(2)); GradientDrawable moodBg = new GradientDrawable(); moodBg.setColor(Color.parseColor("#F7E7ED")); moodBg.setCornerRadius(dp(12)); moodBg.setStroke(dp(1), Color.parseColor("#E8CBD6")); mood.setBackground(moodBg); } meta.addView(mood); paper.addView(meta);
         TextView heading = title(entry.optString("title", "没有标题的一页"), 16); heading.setTypeface(Typeface.create("serif", Typeface.BOLD)); heading.setTextColor(Color.parseColor("#513E48")); paper.addView(heading, matchWrapTop(10));
-        TextView content = body(entry.optString("content", ""), 13); content.setTypeface(Typeface.create("serif", Typeface.NORMAL)); content.setTextColor(Color.parseColor("#66535C")); content.setLineSpacing(dp(6), 1f); setDiaryEntryExpanded(content, current); paper.addView(content, matchWrapTop(10));
+        String fullContent = entry.optString("content", "");
+        TextView content = body(current ? fullContent : diaryPreview(fullContent), 14);
+        content.setTag(fullContent); content.setTypeface(Typeface.create("serif", Typeface.NORMAL)); content.setTextColor(Color.parseColor("#66535C")); content.setLineSpacing(dp(5), 1f); setDiaryEntryExpanded(content, current); paper.addView(content, matchWrapTop(10));
         String tags = diaryTagsText(entry.optJSONArray("tags")); if (!tags.isEmpty()) { TextView tagView = body(tags, 8); tagView.setTextColor(Color.parseColor("#A47788")); paper.addView(tagView, matchWrapTop(14)); }
         TextView expandHint = label(current ? "收起全文  ↑" : "点击展开全文  ↓", 8); expandHint.setTextColor(Color.parseColor("#A47788")); paper.addView(expandHint, matchWrapTop(11));
         if (current) { diaryExpandedPaperView = paper; diaryExpandedContentView = content; diaryExpandedHintView = expandHint; }
         paper.setContentDescription(current ? "点击收起这篇日记" : "点击展开这篇日记");
         paper.setOnClickListener(v -> toggleDiaryEntryPaper(paper, content, expandHint, entryId)); paper.setClickable(true); paper.setFocusable(true);
         return paper;
+    }
+
+    private String diaryPreview(String full) {
+        if (full == null || full.length() <= 180) return full == null ? "" : full;
+        return full.substring(0, 180) + "…";
     }
 
     private void setDiaryEntryExpanded(TextView content, boolean expanded) {
@@ -910,11 +917,13 @@ public class MainActivity extends Activity {
     private void toggleDiaryEntryPaper(View paper, TextView content, TextView hint, String entryId) {
         boolean expanding = !entryId.equals(diaryCurrentEntryId);
         if (expanding && diaryExpandedContentView != null && diaryExpandedContentView != content) {
+            diaryExpandedContentView.setText(diaryPreview(String.valueOf(diaryExpandedContentView.getTag())));
             setDiaryEntryExpanded(diaryExpandedContentView, false);
             if (diaryExpandedHintView != null) diaryExpandedHintView.setText("点击展开全文  ↓");
             if (diaryExpandedPaperView != null) diaryExpandedPaperView.setContentDescription("点击展开这篇日记");
         }
         diaryCurrentEntryId = expanding ? entryId : "";
+        content.setText(expanding ? String.valueOf(content.getTag()) : diaryPreview(String.valueOf(content.getTag())));
         setDiaryEntryExpanded(content, expanding);
         hint.setText(expanding ? "收起全文  ↑" : "点击展开全文  ↓");
         paper.setContentDescription(expanding ? "点击收起这篇日记" : "点击展开这篇日记");
