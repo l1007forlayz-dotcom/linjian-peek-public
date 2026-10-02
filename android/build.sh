@@ -1,6 +1,8 @@
 #!/bin/bash
 set -e
 
+# v0.3.8.7: locked private diary build
+
 export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}
 PLATFORM=$ANDROID_HOME/platforms/android-34/android.jar
