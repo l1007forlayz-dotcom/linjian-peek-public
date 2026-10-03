@@ -23,6 +23,8 @@ public final class DiaryState {
     public static final String KEY_ENTRIES = "ta_diary_entries_json";
     public static final String DEFAULT_COVER = "default_soft_notebook";
     public static final String ADULT_ARCHIVE_COVER = "adult_archive_target";
+    public static final String DAILY_BOOK_KIND = "daily";
+    public static final String ADULT_BOOK_KIND = "adult_archive";
     public static final String LOCK_SEED_PREFIX = "locked_private_seed_v1:";
     public static final String LOCK_GENERATE_COVER = "locked_private_generate_v1";
 
@@ -31,6 +33,7 @@ public final class DiaryState {
     public static JSONArray books(Context ctx) {
         JSONArray all = readArray(ctx, KEY_BOOKS);
         boolean changed = migrateBookMetadata(all);
+        changed = ensureCoreBooks(all) || changed;
         if (changed) saveArray(ctx, KEY_BOOKS, all);
         migrateAdultEntries(ctx, all);
         return all;
@@ -114,6 +117,8 @@ public final class DiaryState {
     public static JSONObject writeEntry(Context ctx, String bookId, String title, String content, String mood, JSONArray tags, String date, String timeLabel) {
         JSONObject out = new JSONObject();
         try {
+            JSONArray normalizedTags = normalizeTags(tags);
+            bookId = routedBookId(ctx, bookId, normalizedTags);
             if (bookById(ctx, bookId) == null) return out.put("ok", false).put("error", "book_not_found");
             if (clean(content).isEmpty()) return out.put("ok", false).put("error", "content_required");
             JSONObject entry = new JSONObject();
@@ -122,7 +127,7 @@ public final class DiaryState {
             entry.put("title", limit(clean(title).isEmpty() ? "没有标题的一页" : clean(title), 100));
             entry.put("content", limit(clean(content), 12000));
             entry.put("mood", limit(clean(mood), 40));
-            entry.put("tags", normalizeTags(tags));
+            entry.put("tags", normalizedTags);
             entry.put("date", normalizeDate(date));
             entry.put("time_label", limit(clean(timeLabel), 30));
             entry.put("created_at", now());
@@ -154,7 +159,11 @@ public final class DiaryState {
                 entry.put("content", limit(content, 12000));
             }
             if (values.has("mood")) entry.put("mood", limit(clean(values.optString("mood", "")), 40));
-            if (values.has("tags")) entry.put("tags", normalizeTags(values.optJSONArray("tags")));
+            if (values.has("tags")) {
+                JSONArray normalizedTags = normalizeTags(values.optJSONArray("tags"));
+                entry.put("tags", normalizedTags);
+                entry.put("book_id", routedBookId(ctx, entry.optString("book_id", ""), normalizedTags));
+            }
             if (values.has("date")) entry.put("date", normalizeDate(values.optString("date", "")));
             if (values.has("time_label")) entry.put("time_label", limit(clean(values.optString("time_label", "")), 30));
             entry.put("updated_at", now());
@@ -287,11 +296,75 @@ public final class DiaryState {
         return changed;
     }
 
+    private static boolean ensureCoreBooks(JSONArray all) {
+        boolean changed = false;
+        JSONObject daily = null, adult = null;
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject book = all.optJSONObject(i); if (book == null) continue;
+            String kind = clean(book.optString("book_kind", ""));
+            String style = clean(book.optString("cover_style", ""));
+            String name = clean(book.optString("name", ""));
+            if (ADULT_BOOK_KIND.equals(kind) || ADULT_ARCHIVE_COVER.equals(style) || looksLikeAdultBook(name)) {
+                if (adult == null) adult = book;
+                continue;
+            }
+            if (!isLocked(book) && daily == null) daily = book;
+        }
+        try {
+            if (daily == null) {
+                daily = managedBook("book_daily", "祁老师随笔", "把今天看见的你，轻轻写下来。", DEFAULT_COVER, DAILY_BOOK_KIND);
+                all.put(daily); changed = true;
+            } else if (!DAILY_BOOK_KIND.equals(daily.optString("book_kind", ""))) {
+                daily.put("book_kind", DAILY_BOOK_KIND); changed = true;
+            }
+            if (adult == null) {
+                adult = managedBook("book_adult_archive", "祁昼的成人番外", "只收好成年人之间的虚构番外。", ADULT_ARCHIVE_COVER, ADULT_BOOK_KIND);
+                all.put(adult); changed = true;
+            } else {
+                if (!ADULT_BOOK_KIND.equals(adult.optString("book_kind", ""))) { adult.put("book_kind", ADULT_BOOK_KIND); changed = true; }
+                if (!ADULT_ARCHIVE_COVER.equals(adult.optString("cover_style", ""))) { adult.put("cover_style", ADULT_ARCHIVE_COVER); changed = true; }
+            }
+            if (changed) {
+                daily.put("updated_at", now());
+                adult.put("updated_at", now());
+            }
+        } catch (Exception ignored) { }
+        return changed;
+    }
+
+    private static JSONObject managedBook(String id, String name, String subtitle, String coverStyle, String kind) throws Exception {
+        return new JSONObject()
+                .put("id", id)
+                .put("name", name)
+                .put("subtitle", subtitle)
+                .put("cover_style", coverStyle)
+                .put("cover_uri", "")
+                .put("book_kind", kind)
+                .put("created_at", now())
+                .put("updated_at", now());
+    }
+
+    private static boolean looksLikeAdultBook(String name) {
+        String value = clean(name);
+        return value.contains("成人番外") || value.contains("色色番外") || value.contains("色色日记");
+    }
+
+    private static String routedBookId(Context ctx, String requestedBookId, JSONArray tags) {
+        if (!hasAdultTag(tags)) return requestedBookId;
+        JSONArray all = books(ctx);
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject book = all.optJSONObject(i); if (book == null) continue;
+            if (ADULT_BOOK_KIND.equals(book.optString("book_kind", "")) || ADULT_ARCHIVE_COVER.equals(book.optString("cover_style", "")))
+                return book.optString("id", requestedBookId);
+        }
+        return requestedBookId;
+    }
+
     private static void migrateAdultEntries(Context ctx, JSONArray allBooks) {
         String targetId = "";
         for (int i = 0; i < allBooks.length(); i++) {
             JSONObject book = allBooks.optJSONObject(i);
-            if (book != null && ADULT_ARCHIVE_COVER.equals(book.optString("cover_style", ""))) {
+            if (book != null && (ADULT_BOOK_KIND.equals(book.optString("book_kind", "")) || ADULT_ARCHIVE_COVER.equals(book.optString("cover_style", "")))) {
                 targetId = book.optString("id", ""); break;
             }
         }
@@ -300,7 +373,7 @@ public final class DiaryState {
         for (int i = 0; i < all.length(); i++) {
             JSONObject entry = all.optJSONObject(i); if (entry == null || targetId.equals(entry.optString("book_id", ""))) continue;
             JSONArray tags = entry.optJSONArray("tags");
-            if (hasTag(tags, "成人虚构番外")) {
+            if (hasAdultTag(tags)) {
                 try { entry.put("book_id", targetId).put("updated_at", now()); changed = true; } catch (Exception ignored) { }
             }
         }
@@ -311,6 +384,10 @@ public final class DiaryState {
         if (tags == null) return false;
         for (int i = 0; i < tags.length(); i++) if (wanted.equalsIgnoreCase(clean(tags.optString(i)))) return true;
         return false;
+    }
+
+    private static boolean hasAdultTag(JSONArray tags) {
+        return hasTag(tags, "成人虚构番外") || hasTag(tags, "成人番外") || hasTag(tags, "色色番外");
     }
 
     private static void recordLockEvent(Context ctx, JSONObject book, boolean success, int attempts) {
