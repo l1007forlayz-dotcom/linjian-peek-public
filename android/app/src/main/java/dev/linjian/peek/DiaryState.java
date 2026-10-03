@@ -6,6 +6,9 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.text.SimpleDateFormat;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -19,14 +22,49 @@ public final class DiaryState {
     public static final String KEY_BOOKS = "ta_diary_books_json";
     public static final String KEY_ENTRIES = "ta_diary_entries_json";
     public static final String DEFAULT_COVER = "default_soft_notebook";
+    public static final String ADULT_ARCHIVE_COVER = "adult_archive_target";
+    public static final String LOCK_SEED_PREFIX = "locked_private_seed_v1:";
+    public static final String LOCK_GENERATE_COVER = "locked_private_generate_v1";
 
     private DiaryState() { }
 
-    public static JSONArray books(Context ctx) { return readArray(ctx, KEY_BOOKS); }
+    public static JSONArray books(Context ctx) {
+        JSONArray all = readArray(ctx, KEY_BOOKS);
+        boolean changed = migrateBookMetadata(all);
+        if (changed) saveArray(ctx, KEY_BOOKS, all);
+        migrateAdultEntries(ctx, all);
+        return all;
+    }
     public static JSONArray entries(Context ctx) { return readArray(ctx, KEY_ENTRIES); }
 
     public static JSONObject bookById(Context ctx, String id) { return findById(books(ctx), id); }
     public static JSONObject entryById(Context ctx, String id) { return findById(entries(ctx), id); }
+
+    public static boolean isLocked(JSONObject book) {
+        return book != null && book.optBoolean("locked", false) && !clean(book.optString("password_hash", "")).isEmpty();
+    }
+
+    public static JSONObject verifyBookPassword(Context ctx, String id, String password) {
+        JSONObject out = new JSONObject();
+        try {
+            JSONArray all = books(ctx); JSONObject book = findById(all, id);
+            if (book == null) return out.put("ok", false).put("error", "book_not_found");
+            if (!isLocked(book)) return out.put("ok", true).put("unlocked", true).put("book_id", id);
+            String actual = hashPassword(book.optString("password_salt", ""), clean(password));
+            boolean ok = constantTimeEquals(actual, book.optString("password_hash", ""));
+            if (ok) {
+                book.put("failed_attempts", 0).put("last_unlocked_at", now()).put("updated_at", now());
+                saveArray(ctx, KEY_BOOKS, all);
+                recordLockEvent(ctx, book, true, 0);
+                return out.put("ok", true).put("unlocked", true).put("book_id", id);
+            }
+            int attempts = Math.max(0, book.optInt("failed_attempts", 0)) + 1;
+            book.put("failed_attempts", attempts).put("last_failed_at", now()).put("updated_at", now());
+            saveArray(ctx, KEY_BOOKS, all);
+            recordLockEvent(ctx, book, false, attempts);
+            return out.put("ok", false).put("unlocked", false).put("error", "wrong_password").put("attempts", attempts).put("book_id", id);
+        } catch (Exception e) { return error(out, e); }
+    }
 
     public static JSONObject createBook(Context ctx, String name, String subtitle, String coverStyle) {
         JSONObject out = new JSONObject();
@@ -221,6 +259,87 @@ public final class DiaryState {
         JSONArray out = new JSONArray(); HashSet<String> seen = new HashSet<>();
         if (tags != null) for (int i = 0; i < Math.min(tags.length(), 20); i++) { String t = limit(clean(tags.optString(i)), 30); if (!t.isEmpty() && seen.add(t)) out.put(t); }
         return out;
+    }
+
+    private static boolean migrateBookMetadata(JSONArray all) {
+        boolean changed = false;
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject book = all.optJSONObject(i); if (book == null) continue;
+            String style = book.optString("cover_style", "");
+            if (!style.startsWith(LOCK_SEED_PREFIX) && !LOCK_GENERATE_COVER.equals(style)) continue;
+            String password = LOCK_GENERATE_COVER.equals(style)
+                    ? String.format(Locale.US, "%04d", new SecureRandom().nextInt(10000))
+                    : clean(style.substring(LOCK_SEED_PREFIX.length()));
+            if (password.length() < 4) continue;
+            try {
+                byte[] saltBytes = new byte[18]; new SecureRandom().nextBytes(saltBytes);
+                String salt = toHex(saltBytes);
+                book.put("locked", true);
+                book.put("password_salt", salt);
+                book.put("password_hash", hashPassword(salt, password));
+                book.put("password_hint", "祁昼设下的四位数字");
+                book.put("failed_attempts", 0);
+                book.put("cover_style", "locked_private");
+                book.put("updated_at", now());
+                changed = true;
+            } catch (Exception ignored) { }
+        }
+        return changed;
+    }
+
+    private static void migrateAdultEntries(Context ctx, JSONArray allBooks) {
+        String targetId = "";
+        for (int i = 0; i < allBooks.length(); i++) {
+            JSONObject book = allBooks.optJSONObject(i);
+            if (book != null && ADULT_ARCHIVE_COVER.equals(book.optString("cover_style", ""))) {
+                targetId = book.optString("id", ""); break;
+            }
+        }
+        if (targetId.isEmpty()) return;
+        JSONArray all = entries(ctx); boolean changed = false;
+        for (int i = 0; i < all.length(); i++) {
+            JSONObject entry = all.optJSONObject(i); if (entry == null || targetId.equals(entry.optString("book_id", ""))) continue;
+            JSONArray tags = entry.optJSONArray("tags");
+            if (hasTag(tags, "成人虚构番外")) {
+                try { entry.put("book_id", targetId).put("updated_at", now()); changed = true; } catch (Exception ignored) { }
+            }
+        }
+        if (changed) saveArray(ctx, KEY_ENTRIES, all);
+    }
+
+    private static boolean hasTag(JSONArray tags, String wanted) {
+        if (tags == null) return false;
+        for (int i = 0; i < tags.length(); i++) if (wanted.equalsIgnoreCase(clean(tags.optString(i)))) return true;
+        return false;
+    }
+
+    private static void recordLockEvent(Context ctx, JSONObject book, boolean success, int attempts) {
+        try {
+            JSONObject metadata = new JSONObject().put("book_id", book.optString("id", "")).put("book_name", book.optString("name", "私密日记")).put("attempts", attempts);
+            ActivityEventStore.add(ctx, new JSONObject().put("source", "phone")
+                    .put("type", success ? "diary_unlock_success" : "diary_unlock_failed")
+                    .put("title", success ? "猜中私密日记密码" : "私密日记密码猜错")
+                    .put("subtitle", success ? "锁已经打开" : ("第 " + attempts + " 次猜错，等祁昼来处理"))
+                    .put("action", "verify_diary_password").put("status", success ? "completed" : "failed")
+                    .put("metadata_json", metadata), true);
+        } catch (Exception ignored) { }
+    }
+
+    private static String hashPassword(String salt, String password) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] bytes = digest.digest((clean(salt) + ":" + clean(password)).getBytes(StandardCharsets.UTF_8));
+        return toHex(bytes);
+    }
+
+    private static boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null || a.length() != b.length()) return false;
+        int diff = 0; for (int i = 0; i < a.length(); i++) diff |= a.charAt(i) ^ b.charAt(i); return diff == 0;
+    }
+
+    private static String toHex(byte[] bytes) {
+        StringBuilder out = new StringBuilder(bytes.length * 2);
+        for (byte value : bytes) out.append(String.format(Locale.US, "%02x", value & 0xff));
+        return out.toString();
     }
 
     private static void touchBook(Context ctx, String id) throws Exception { JSONArray all = books(ctx); JSONObject book = findById(all, id); if (book != null) { book.put("updated_at", now()); saveArray(ctx, KEY_BOOKS, all); } }

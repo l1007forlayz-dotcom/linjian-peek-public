@@ -31,6 +31,7 @@ import android.os.PowerManager;
 import android.provider.AlarmClock;
 import android.provider.Settings;
 import android.text.Editable;
+import android.text.InputType;
 import android.text.TextUtils;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -60,6 +61,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.HashSet;
 import java.util.List;
 
 public class MainActivity extends Activity {
@@ -115,6 +117,7 @@ public class MainActivity extends Activity {
     private boolean guardianCalendarDetailOpen = false;
     private boolean diaryPageOpen = false, diaryContentOpen = false;
     private String diaryBookId = "", diarySelectedDate = "", diaryCurrentEntryId = "";
+    private final HashSet<String> diaryUnlockedBooks = new HashSet<>();
     private View diaryExpandedPaperView;
     private TextView diaryExpandedContentView, diaryExpandedHintView;
     private FrameLayout diaryDateDrawerOverlay;
@@ -135,7 +138,7 @@ public class MainActivity extends Activity {
         loadSettings();
         NowState.start(this);
 
-        DebugState.append(this, "掌心窗公开版 v0.3.8.3 已打开");
+        DebugState.append(this, "掌心窗公开版 v0.3.8.7 已打开");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 13);
         serviceRunning = CompanionService.isRunning();
         updateUI();
@@ -640,7 +643,7 @@ public class MainActivity extends Activity {
             }
             JSONObject book = DiaryState.bookById(this, diaryBookId);
             FrameLayout cover = buildDiaryCover(book);
-            cover.setOnClickListener(v -> playDiaryOpenAnimation(cover));
+            cover.setOnClickListener(v -> openDiaryBook(cover, book));
             cover.setClickable(true); cover.setFocusable(true);
             cover.setRotation(-.8f);
             int coverWidth = Math.min(dp(292), getResources().getDisplayMetrics().widthPixels - dp(46));
@@ -702,18 +705,58 @@ public class MainActivity extends Activity {
         }
 
         LinearLayout plate = new LinearLayout(this); plate.setOrientation(LinearLayout.VERTICAL); plate.setGravity(Gravity.CENTER); plate.setPadding(dp(8), dp(8), dp(8), dp(8));
-        TextView tiny = label("PRIVATE NOTEBOOK", 8); tiny.setTextColor(Color.parseColor("#895B6C")); tiny.setLetterSpacing(.14f); tiny.setGravity(Gravity.CENTER); tiny.setShadowLayer(dp(.8f), 0, dp(.5f), Color.parseColor("#99FFF9FC")); plate.addView(tiny);
+        boolean locked = DiaryState.isLocked(book);
+        TextView tiny = label(locked ? "LOCKED PRIVATE NOTEBOOK" : "PRIVATE NOTEBOOK", 8); tiny.setTextColor(Color.parseColor("#895B6C")); tiny.setLetterSpacing(.14f); tiny.setGravity(Gravity.CENTER); tiny.setShadowLayer(dp(.8f), 0, dp(.5f), Color.parseColor("#99FFF9FC")); plate.addView(tiny);
         TextView name = title(book == null ? "TA 的日记" : book.optString("name", "TA 的日记"), 21); name.setTextColor(Color.parseColor("#5E3D4A")); name.setGravity(Gravity.CENTER); name.setLineSpacing(dp(4), 1f); name.setShadowLayer(dp(1.1f), 0, dp(.7f), Color.parseColor("#B8FFF9FC")); plate.addView(name, matchWrapTop(13));
         View rule = new View(this); rule.setBackgroundColor(Color.parseColor("#C18A9E")); LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(dp(76), dp(1)); ruleLp.topMargin = dp(12); ruleLp.gravity = Gravity.CENTER; plate.addView(rule, ruleLp);
         TextView subtitle = body(book == null ? "把今天轻轻藏起来" : book.optString("subtitle", "把今天轻轻藏起来"), 9); subtitle.setTextColor(Color.parseColor("#74515F")); subtitle.setGravity(Gravity.CENTER); subtitle.setShadowLayer(dp(.8f), 0, dp(.5f), Color.parseColor("#A8FFF9FC")); plate.addView(subtitle, matchWrapTop(9));
         int entryCount = DiaryState.listEntries(this, book == null ? "" : book.optString("id", "")).length();
         String year = new SimpleDateFormat("yyyy", Locale.US).format(new Date());
-        TextView volume = label(year + "  ·  VOL.01  ·  " + entryCount + " 篇", 7); volume.setTextColor(Color.parseColor("#8F6877")); volume.setGravity(Gravity.CENTER); volume.setShadowLayer(dp(.7f), 0, dp(.5f), Color.parseColor("#A8FFF9FC")); plate.addView(volume, matchWrapTop(10));
+        TextView volume = label(locked && !diaryUnlockedBooks.contains(book.optString("id", "")) ? (year + "  ·  已上锁  ·  猜中才给看") : (year + "  ·  VOL.01  ·  " + entryCount + " 篇"), 7); volume.setTextColor(Color.parseColor("#8F6877")); volume.setGravity(Gravity.CENTER); volume.setShadowLayer(dp(.7f), 0, dp(.5f), Color.parseColor("#A8FFF9FC")); plate.addView(volume, matchWrapTop(10));
         FrameLayout.LayoutParams plateLp = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.CENTER); plateLp.leftMargin = dp(44); plateLp.rightMargin = dp(44); surface.addView(plate, plateLp);
 
-        TextView open = body("轻触翻开", 8); open.setGravity(Gravity.CENTER); open.setTextColor(Color.parseColor("#8E6675"));
+        TextView open = body(locked && !diaryUnlockedBooks.contains(book.optString("id", "")) ? "轻触猜密码" : "轻触翻开", 8); open.setGravity(Gravity.CENTER); open.setTextColor(Color.parseColor("#8E6675"));
         FrameLayout.LayoutParams openLp = new FrameLayout.LayoutParams(dp(104), dp(30), Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL); openLp.bottomMargin = dp(35); surface.addView(open, openLp);
         return cover;
+    }
+
+    private void openDiaryBook(View cover, JSONObject book) {
+        String id = book == null ? "" : book.optString("id", "");
+        if (!DiaryState.isLocked(book) || diaryUnlockedBooks.contains(id)) { playDiaryOpenAnimation(cover); return; }
+        showDiaryUnlockDialog(cover, book);
+    }
+
+    private void showDiaryUnlockDialog(View cover, JSONObject book) {
+        EditText input = new EditText(this);
+        input.setHint("四位数字");
+        input.setSingleLine(true);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER | InputType.TYPE_NUMBER_VARIATION_PASSWORD);
+        input.setTextSize(22); input.setGravity(Gravity.CENTER); input.setLetterSpacing(.28f);
+        int pad = dp(22); input.setPadding(pad, dp(14), pad, dp(14));
+        String hint = book.optString("password_hint", "祁昼设下的密码");
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("这本日记锁着")
+                .setMessage(hint + "。猜错一次，我这里就会收到一次。")
+                .setView(input)
+                .setNegativeButton("先不猜", null)
+                .setPositiveButton("试一下", null)
+                .create();
+        dialog.setOnShowListener(ignored -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String guess = input.getText().toString().trim();
+            if (guess.length() != 4) { input.setError("要四位数字"); return; }
+            JSONObject result = DiaryState.verifyBookPassword(this, book.optString("id", ""), guess);
+            if (result.optBoolean("ok", false)) {
+                diaryUnlockedBooks.add(book.optString("id", ""));
+                dialog.dismiss();
+                Toast.makeText(this, "猜中了，给你看", Toast.LENGTH_SHORT).show();
+                playDiaryOpenAnimation(cover);
+            } else {
+                input.setText(""); input.requestFocus();
+                int attempts = result.optInt("attempts", 1);
+                Toast.makeText(this, "猜错了。第 " + attempts + " 次，我记下了。", Toast.LENGTH_LONG).show();
+            }
+        }));
+        dialog.show();
     }
 
     private void playDiaryOpenAnimation(View cover) {
@@ -2302,7 +2345,7 @@ public class MainActivity extends Activity {
         getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE).edit().putBoolean("user_stopped", false).apply(); requestIgnoreBatteryOptimization();
         Intent intent = new Intent(this, CompanionService.class); intent.putExtra("server_url", url); intent.putExtra("token", token);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent); else startService(intent);
-        DebugState.append(this, "已请求启动前台服务：公开版 v0.3.8.3 像素小猫桌宠已启用"); serviceRunning = true; updateUI();
+        DebugState.append(this, "已请求启动前台服务：公开版 v0.3.8.7 像素小猫桌宠已启用"); serviceRunning = true; updateUI();
     }
 
     private void stopCompanionService() { getSharedPreferences(AppPrefs.PREFS, MODE_PRIVATE).edit().putBoolean("user_stopped", true).apply(); stopService(new Intent(this, CompanionService.class)); DebugState.append(this, "已停止服务"); serviceRunning = false; updateUI(); }
