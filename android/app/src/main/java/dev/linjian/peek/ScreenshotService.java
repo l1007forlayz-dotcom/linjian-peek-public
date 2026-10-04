@@ -18,6 +18,7 @@ import android.os.Looper;
 import android.view.Display;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
@@ -165,15 +166,78 @@ public class ScreenshotService extends AccessibilityService {
     public void refreshScreenModel() { updateScreenText(); }
 
     private void updateScreenText() {
+        AccessibilityNodeInfo activeRoot = null;
         try {
-            AccessibilityNodeInfo root = getRootInActiveWindow();
             StringBuilder sb = new StringBuilder();
             JSONArray nodes = new JSONArray();
-            collect(root, sb, nodes, 0, 0);
+
+            activeRoot = getRootInActiveWindow();
+            collect(activeRoot, sb, nodes, 0, 0);
+
+            // Android 偶尔会把输入法、系统浮层或空窗口当成 active root，
+            // 导致明明屏幕有内容却得到 []。节点为空时，从可交互窗口里
+            // 再找一次当前前台 App 的 root；找不到匹配包名时再尝试其它窗口。
+            if (nodes.length() == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                java.util.List<AccessibilityWindowInfo> windows = getWindows();
+                if (windows != null && !windows.isEmpty()) {
+                    String targetPackage = currentPackage();
+                    boolean foundReadable = false;
+
+                    // 第一轮只读当前前台包，避免先捞到输入法/系统浮层。
+                    if (targetPackage != null && !targetPackage.isEmpty()) {
+                        for (AccessibilityWindowInfo window : windows) {
+                            AccessibilityNodeInfo candidate = null;
+                            try {
+                                candidate = window == null ? null : window.getRoot();
+                                CharSequence pkg = candidate == null ? null : candidate.getPackageName();
+                                if (candidate != null && pkg != null && targetPackage.equals(pkg.toString())) {
+                                    collect(candidate, sb, nodes, 0, 0);
+                                    if (nodes.length() > 0) {
+                                        foundReadable = true;
+                                        break;
+                                    }
+                                }
+                            } catch (Exception ignored) {
+                            } finally {
+                                if (candidate != null && candidate != activeRoot) {
+                                    try { candidate.recycle(); } catch (Exception ignored) { }
+                                }
+                            }
+                        }
+                    }
+
+                    // 某些页面 currentPackage 会短暂落在系统界面；再尝试 active/focused 窗口。
+                    if (!foundReadable && nodes.length() == 0) {
+                        for (AccessibilityWindowInfo window : windows) {
+                            AccessibilityNodeInfo candidate = null;
+                            try {
+                                if (window == null || (!window.isActive() && !window.isFocused())) continue;
+                                candidate = window.getRoot();
+                                collect(candidate, sb, nodes, 0, 0);
+                                if (nodes.length() > 0) break;
+                            } catch (Exception ignored) {
+                            } finally {
+                                if (candidate != null && candidate != activeRoot) {
+                                    try { candidate.recycle(); } catch (Exception ignored) { }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             screenText = sb.length() > 2400 ? sb.substring(0, 2400) : sb.toString();
             screenNodesJson = nodes.toString();
-            if (root != null) root.recycle();
-        } catch (Exception ignored) { }
+            if (nodes.length() == 0) {
+                DebugState.append(this, "读屏节点为空：activeRoot=" + (activeRoot != null) + " currentPackage=" + currentPackage());
+            }
+        } catch (Exception e) {
+            DebugState.append(this, "读屏模型刷新异常：" + shortMsg(e));
+        } finally {
+            if (activeRoot != null) {
+                try { activeRoot.recycle(); } catch (Exception ignored) { }
+            }
+        }
     }
 
     private int collect(AccessibilityNodeInfo node, StringBuilder sb, JSONArray nodes, int depth, int count) {
