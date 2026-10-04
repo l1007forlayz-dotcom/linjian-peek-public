@@ -25,7 +25,7 @@ child.stderr.on('data', data => logs += data);
 try {
     let healthy = false;
     for (let i = 0; i < 40; i++) {
-        try { const r = await fetch(base + '/health'); healthy = (await r.json()).overlayApi === 'v5'; } catch {}
+        try { const r = await fetch(base + '/health'); healthy = ['v5', 'v6'].includes((await r.json()).overlayApi); } catch {}
         if (healthy) break;
         await delay(100);
     }
@@ -54,6 +54,31 @@ try {
     assert.equal(await readFile(statePath, 'utf8'), '{broken', 'failed reads do not overwrite data');
     await writeFile(statePath, original);
     assert.equal((await fetch(endpoint, { headers })).status, 200, 'recovers when state becomes readable');
+    if (payload.actionsAvailable) {
+        assert.equal(payload.scope, 'shared');
+        assert.ok(payload.touchZones.length > 0);
+        const actionUrl = endpoint + '/interact';
+        const actionBody = { action: 'touch', zone: payload.touchZones[0], intensity: 1, requestId: 'test-interaction-request-001' };
+        const post = async (body, auth = headers) => fetch(actionUrl, {
+            method: 'POST', headers: { ...auth, 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+        });
+        assert.equal((await post(actionBody, {})).status, 401);
+        assert.equal((await post({ ...actionBody, zone: 'invalid-zone' })).status, 400);
+        assert.equal((await post({ ...actionBody, intensity: 99 })).status, 400);
+        const first = await post(actionBody);
+        assert.equal(first.status, 200);
+        const result = await first.json();
+        assert.equal(result.lastTouch, actionBody.zone);
+        assert.equal(result.scope, 'shared');
+        const saved = await readFile(statePath, 'utf8');
+        const replay = await post(actionBody);
+        assert.equal(replay.status, 200);
+        assert.deepEqual(await replay.json(), result);
+        assert.equal(await readFile(statePath, 'utf8'), saved, 'same action ID is not performed twice');
+        assert.equal((await post({ ...actionBody, action: 'approach' })).status, 409);
+        assert.equal((await post({ ...actionBody, requestId: 'test-interaction-request-002' })).status, 429);
+        console.log('PASS: interactive controls, authentication, invalid input rejection, deduplication and shared-state labeling');
+    }
     const init = await fetch(`${base}/mcp/${token}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream' },
         body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'initialize', params: { protocolVersion: '2025-03-26', capabilities: {}, clientInfo: { name: 'overlay-test', version: '1' } } })

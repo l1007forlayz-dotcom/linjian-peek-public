@@ -23,7 +23,11 @@ import java.util.Locale;
 final class StatusOverlayView {
     private final Context context;
     private final WindowManager manager;
-    private final LinearLayout root, details;
+    private final LinearLayout root, details, rows, zones, actions;
+    interface Interaction { void run(String action, String zone); }
+    private final Interaction interaction;
+    private boolean busy;
+    private String reaction = "";
     private final TextView title, mood, activity, physiology, metrics, footer, collapse;
     private final WindowManager.LayoutParams params;
     private boolean attached, collapsed;
@@ -31,8 +35,9 @@ final class StatusOverlayView {
     private String connection = "正在连接…";
     private long receivedAt;
 
-    StatusOverlayView(Context ctx, Runnable stop, Runnable retry) {
+    StatusOverlayView(Context ctx, Runnable stop, Runnable retry, Interaction interaction) {
         context = ctx;
+        this.interaction = interaction;
         manager = (WindowManager)ctx.getSystemService(Context.WINDOW_SERVICE);
         collapsed = AppPrefs.get(ctx).getBoolean(StatusOverlayConfig.COLLAPSED, false);
         root = new LinearLayout(ctx);
@@ -60,17 +65,27 @@ final class StatusOverlayView {
         header.addView(close, new LinearLayout.LayoutParams(dp(40), dp(36)));
         root.addView(header);
         details = new LinearLayout(ctx); details.setOrientation(LinearLayout.VERTICAL);
-        mood = row("♡ 心情", details);
-        activity = row("◌ 正在", details);
-        physiology = row("♨ 身体", details);
+        rows = new LinearLayout(ctx); rows.setOrientation(LinearLayout.VERTICAL);
+        mood = row("♡ 心情", rows);
+        activity = row("◌ 正在", rows);
+        physiology = row("♨ 身体", rows);
+        details.addView(rows);
+        zones = new LinearLayout(ctx); zones.setOrientation(LinearLayout.VERTICAL);
+        zones.setVisibility(View.GONE);
+        details.addView(zones, new LinearLayout.LayoutParams(-1, dp(78)));
         metrics = text(12, Color.rgb(114, 79, 166));
         metrics.setGravity(Gravity.CENTER_VERTICAL);
-        details.addView(metrics, new LinearLayout.LayoutParams(-1, dp(28)));
+        details.addView(metrics, new LinearLayout.LayoutParams(-1, dp(18)));
+        actions = new LinearLayout(ctx);
+        addAction(actions, "♡ 靠近", () -> interaction.run("approach", ""));
+        addAction(actions, "♧ 摸摸", this::toggleZones);
+        addAction(actions, "↻ 刷新", retry);
+        details.addView(actions, new LinearLayout.LayoutParams(-1, dp(30)));
         footer = text(10, Color.rgb(115, 103, 137));
         footer.setGravity(Gravity.CENTER_VERTICAL);
         footer.setContentDescription("同步状态，点击重试");
         footer.setOnClickListener(v -> retry.run());
-        details.addView(footer, new LinearLayout.LayoutParams(-1, dp(26)));
+        details.addView(footer, new LinearLayout.LayoutParams(-1, dp(18)));
         root.addView(details);
 
         params = new WindowManager.LayoutParams(width(), collapsed ? dp(44) : dp(188),
@@ -124,6 +139,48 @@ final class StatusOverlayView {
         snapshot = data; connection = message; receivedAt = timestamp; render();
     }
 
+    void setBusy(boolean value) {
+        busy = value;
+        for (int i = 0; i < actions.getChildCount(); i++) actions.getChildAt(i).setEnabled(!value);
+        actions.setAlpha(value ? .45f : 1f);
+    }
+
+    void showReaction(String value) { reaction = value; }
+
+    private void toggleZones() {
+        if (busy) return;
+        if (zones.getVisibility() == View.VISIBLE) {
+            zones.setVisibility(View.GONE); rows.setVisibility(View.VISIBLE); return;
+        }
+        org.json.JSONArray options = snapshot == null ? null : snapshot.optJSONArray("touchZones");
+        if (options == null || options.length() == 0) {
+            footer.setText("请先安装服务器 v6 以启用触碰"); return;
+        }
+        zones.removeAllViews();
+        LinearLayout line = null;
+        int count = Math.min(9, options.length());
+        for (int i = 0; i < count; i++) {
+            if (i % 3 == 0) {
+                line = new LinearLayout(context);
+                zones.addView(line, new LinearLayout.LayoutParams(-1, dp(26)));
+            }
+            final String zone = options.optString(i);
+            addAction(line, zone, () -> {
+                if (busy) return;
+                zones.setVisibility(View.GONE); rows.setVisibility(View.VISIBLE);
+                interaction.run("touch", zone);
+            });
+        }
+        rows.setVisibility(View.GONE); zones.setVisibility(View.VISIBLE);
+    }
+
+    private void addAction(LinearLayout parent, String label, Runnable action) {
+        TextView button = text(12, Color.rgb(114, 79, 166));
+        button.setText(label); button.setGravity(Gravity.CENTER);
+        button.setContentDescription(label); button.setOnClickListener(v -> { if (!busy) action.run(); });
+        parent.addView(button, new LinearLayout.LayoutParams(0, -1, 1));
+    }
+
     void resize() {
         params.width = width();
         params.height = collapsed ? dp(44) : dp(188);
@@ -144,7 +201,7 @@ final class StatusOverlayView {
         String name = field("name", "祁昼");
         String state = synced ? (snapshot != null && snapshot.optBoolean("online", true) ? "在线" : "离线")
                 : (snapshot == null ? "连接中" : "暂未同步");
-        title.setText(name + " · " + state);
+        title.setText(name + " · 共用 · " + state);
         collapse.setText(collapsed ? "+" : "−");
         mood.setText(field("mood", "等待同步"));
         activity.setText(field("activity", "等待同步"));
@@ -153,7 +210,7 @@ final class StatusOverlayView {
         else metrics.setText("⚡ 精力 " + Math.max(0, Math.min(100, snapshot.optInt("energy")))
                 + "%     ·     心跳 " + Math.max(0, Math.min(300, snapshot.optInt("bpm"))) + " BPM");
         String time = receivedAt > 0 ? new SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(new Date(receivedAt)) : "";
-        footer.setText(connection + (time.isEmpty() ? "" : " · 上次 " + time) + (synced ? "" : " · 点此重试"));
+        footer.setText(synced && !reaction.isEmpty() ? reaction : connection + (time.isEmpty() ? "" : " · 上次 " + time));
     }
 
     private String field(String key, String fallback) {
@@ -168,7 +225,7 @@ final class StatusOverlayView {
         row.addView(caption, new LinearLayout.LayoutParams(dp(64), -1));
         TextView value = text(13, Color.rgb(66, 49, 85)); value.setGravity(Gravity.CENTER_VERTICAL);
         row.addView(value, new LinearLayout.LayoutParams(0, -1, 1));
-        parent.addView(row, new LinearLayout.LayoutParams(-1, dp(30)));
+        parent.addView(row, new LinearLayout.LayoutParams(-1, dp(26)));
         return value;
     }
 

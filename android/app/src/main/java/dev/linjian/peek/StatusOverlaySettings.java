@@ -18,8 +18,9 @@ final class StatusOverlaySettings {
         int pad = (int)(20 * activity.getResources().getDisplayMetrics().density);
         box.setPadding(pad, pad / 2, pad, 0);
         TextView help = new TextView(activity);
-        help.setText("粘贴「状态栏1」的完整 MCP 地址。先在服务器安装 v5 升级脚本。\n\n开启后可回 ChatGPT 正常聊天；拖动标题移动，点 − 收成小条，点 × 关闭。亮屏约 5 秒同步一次，熄屏暂停。地址仅保存在本机。\n\n长期使用：给掌心窗允许悬浮窗、通知、自启动，并把电池策略设为不限制。强行停止后需手动开启。\n");
+        help.setText("保留原 MCP 地址，服务器升级到 v6 可恢复靠近、摸摸按钮。\n\n只在 ChatGPT 应用前台显示；切换应用自动隐藏，返回聊天再出现。需开启掌心窗无障碍权限，以识别当前应用。\n\n拖动标题移动，− 折叠，× 关闭。触碰会更新状态；聊天回复仍需你发消息。\n\n长期使用请允许通知、自启动，并把电池策略设为不限制。\n");
         box.addView(help);
+        help.append("\n同一个 MCP 地址的状态由多端、多条聊天共用；聊天记忆不会因此互通。这里只识别 ChatGPT 应用，无法自动识别某条对话。\n");
         EditText input = new EditText(activity);
         input.setSingleLine(true);
         input.setHint("https://你的域名/mcp/私密密钥");
@@ -36,6 +37,12 @@ final class StatusOverlaySettings {
             StatusOverlayConfig config;
             try { config = new StatusOverlayConfig(input.getText().toString()); }
             catch (IllegalArgumentException e) { input.setError(e.getMessage()); return; }
+            if (!ScreenshotService.ready()) {
+                new AlertDialog.Builder(activity).setMessage("只在 ChatGPT 显示需要掌心窗无障碍服务识别应用窗口。请开启后返回，再点保存并开启。")
+                    .setPositiveButton("去设置", (a, b) -> activity.startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                    .setNegativeButton("稍后", null).show();
+                return;
+            }
             if (!Settings.canDrawOverlays(activity)) {
                 new AlertDialog.Builder(activity).setMessage("请先允许掌心窗显示悬浮窗，返回后再次点「保存并开启」。")
                     .setPositiveButton("去授权", (a, b) -> activity.startActivity(new Intent(

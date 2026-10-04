@@ -49,6 +49,19 @@ public final class StatusOverlayService extends Service {
     private int failures;
     private boolean screenRegistered, networkRegistered;
     private ConnectivityManager connectivity;
+    private boolean inChat, actionBusy;
+    private final Runnable scopeTick = new Runnable() {
+        @Override public void run() {
+            if (!alive) return;
+            boolean next = interactive() && StatusOverlayScope.chatGptInFront();
+            if (next != inChat) {
+                inChat = next;
+                refreshVisibility();
+                if (next) kick();
+            }
+            main.postDelayed(this, interactive() ? 350 : 2000);
+        }
+    };
 
     public static boolean restore(Context ctx) {
         if (!AppPrefs.get(ctx).getBoolean(StatusOverlayConfig.ENABLED, false) || !Settings.canDrawOverlays(ctx)) return false;
@@ -92,7 +105,8 @@ public final class StatusOverlayService extends Service {
             alive = true;
             if (overlay == null) overlay = new StatusOverlayView(this, () -> {
                 AppPrefs.get(this).edit().putBoolean(StatusOverlayConfig.ENABLED, false).apply(); stopSelf();
-            }, this::kick);
+            }, this::kick, this::interact);
+            main.removeCallbacks(scopeTick); main.post(scopeTick);
             bindSignals(); refreshVisibility(); kick();
             return START_STICKY;
         } catch (Exception e) {
@@ -124,7 +138,7 @@ public final class StatusOverlayService extends Service {
 
     private void refreshVisibility() {
         if (overlay == null || !alive) return;
-        try { overlay.update(snapshot, message, receivedAt); overlay.show(interactive()); }
+        try { overlay.update(snapshot, message, receivedAt); overlay.show(interactive() && inChat); }
         catch (Exception e) { stopSelf(); }
     }
 
@@ -161,9 +175,9 @@ public final class StatusOverlayService extends Service {
         }
     }
 
-    private void kick() { if (alive && interactive()) schedule(0); }
+    private void kick() { if (alive && interactive() && inChat) schedule(0); }
     private synchronized void schedule(long delay) {
-        if (!alive || worker.isShutdown() || !interactive()) return;
+        if (!alive || worker.isShutdown() || !interactive() || !inChat || actionBusy) return;
         if (pending != null) pending.cancel(false);
         final int stamp = generation;
         final StatusOverlayConfig current = config;
@@ -232,6 +246,66 @@ public final class StatusOverlayService extends Service {
     }
 
     private void cancelRequest() { HttpURLConnection conn = request; if (conn != null) conn.disconnect(); }
+
+    private void interact(String action, String zone) {
+        if (!alive || actionBusy || !inChat) return;
+        if (snapshot == null || !snapshot.optBoolean("actionsAvailable", false)) {
+            message = "请先安装服务器 v6 以启用互动"; refreshVisibility(); return;
+        }
+        actionBusy = true; overlay.setBusy(true);
+        generation++; cancelRequest();
+        synchronized (this) { if (pending != null) pending.cancel(false); }
+        final int stamp = generation;
+        final StatusOverlayConfig target = config;
+        worker.execute(() -> {
+            JSONObject result = null;
+            String error = "未确认结果，请先刷新状态再决定是否重试";
+            HttpURLConnection conn = null;
+            try {
+                JSONObject body = new JSONObject().put("action", action).put("zone", zone)
+                        .put("intensity", 1).put("requestId", java.util.UUID.randomUUID().toString());
+                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+                conn = (HttpURLConnection)new URL(target.endpoint + "/interact").openConnection();
+                conn.setInstanceFollowRedirects(false); conn.setUseCaches(false);
+                conn.setRequestMethod("POST"); conn.setDoOutput(true);
+                conn.setConnectTimeout(7000); conn.setReadTimeout(7000);
+                // Streaming mode prevents HttpURLConnection replaying the POST on authentication/redirect.
+                conn.setFixedLengthStreamingMode(bytes.length);
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setRequestProperty("X-Status-Token", target.token);
+                try (java.io.OutputStream out = conn.getOutputStream()) { out.write(bytes); }
+                int code = conn.getResponseCode();
+                if (code == 200) {
+                    try (InputStream input = conn.getInputStream(); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+                        byte[] buffer = new byte[2048]; int n;
+                        while ((n = input.read(buffer)) != -1) {
+                            if (output.size() + n > 16384) throw new IllegalArgumentException();
+                            output.write(buffer, 0, n);
+                        }
+                        result = validSnapshot(new JSONObject(output.toString("UTF-8")));
+                    }
+                } else if (code == 404) error = "请先安装服务器 v6";
+                else if (code == 429) error = "点得有点快，稍等再试";
+                else if (code == 401) error = "地址验证失败，请检查设置";
+            } catch (Exception ignored) { }
+            finally { if (conn != null) conn.disconnect(); }
+            final JSONObject updated = result;
+            final String warning = error;
+            main.post(() -> {
+                if (!alive) return;
+                actionBusy = false; overlay.setBusy(false);
+                if (stamp != generation) { kick(); return; }
+                if (updated != null) {
+                    snapshot = updated; receivedAt = System.currentTimeMillis(); etag = "";
+                    AppPrefs.get(this).edit().putString(StatusOverlayConfig.CACHE, updated.toString())
+                            .putLong(StatusOverlayConfig.CACHE_TIME, receivedAt).apply();
+                    message = "已同步";
+                    overlay.showReaction(updated.optString("reaction", "已更新"));
+                } else message = warning;
+                refreshVisibility(); schedule(5000);
+            });
+        });
+    }
     @Override public void onConfigurationChanged(Configuration configuration) {
         super.onConfigurationChanged(configuration);
         if (overlay != null) { try { overlay.resize(); } catch (Exception e) { stopSelf(); } }
