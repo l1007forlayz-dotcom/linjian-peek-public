@@ -642,9 +642,16 @@ function actionPayloadForCare({ action, target_app = "", package: pkg = "", dura
 async function buildActiveCareSuggestion({ reason = "", care_intent = "check_in", device_id = DEFAULT_DEVICE }) {
   const policy = careState.policy || DEFAULT_CARE_POLICY;
   const life = await linjianFetch(`/api/life_state?device_id=${encodeURIComponent(device_id)}`).then((r) => r.json()).catch((e) => ({ ok: false, error: String(e) }));
-  const guidian = await linjianFetch(`/api/guidian_state?device_id=${encodeURIComponent(device_id)}`).then((r) => r.json()).catch(() => ({}));
-  const lockState = await linjianFetch(`/api/appgate/state?device_id=${encodeURIComponent(device_id)}`).then((r) => r.json()).catch(() => ({}));
   const state = unwrapLifeState(life);
+  // 手机状态本身已经携带 guidian_state / app_gate 时直接复用，避免一次主动查岗额外打 2 个后端请求。
+  const embeddedGuidian = state?.guidian_state;
+  const embeddedAppGate = state?.app_gate;
+  const guidian = embeddedGuidian
+    ? { guidian_state: embeddedGuidian }
+    : await linjianFetch(`/api/guidian_state?device_id=${encodeURIComponent(device_id)}`).then((r) => r.json()).catch(() => ({}));
+  const lockState = embeddedAppGate
+    ? { appgate: embeddedAppGate }
+    : await linjianFetch(`/api/appgate/state?device_id=${encodeURIComponent(device_id)}`).then((r) => r.json()).catch(() => ({}));
   const app = currentAppInfo(state);
   const sensitive = matchSensitiveApp(policy, app.name, app.package);
   const sensitiveUsage = sensitive ? usageMinutesFor(state, sensitive.name, sensitive.package) : 0;
@@ -730,29 +737,44 @@ function candidateOrder() {
 async function linjianFetch(path, options = {}) {
   requireConfig();
   const errors = [];
-  const { timeout_ms, ...fetchOptions } = options || {};
+  const { timeout_ms, retry_429, ...fetchOptions } = options || {};
   const timeoutMs = Math.max(500, Number(timeout_ms || DEFAULT_FETCH_TIMEOUT_MS));
+  const method = String(fetchOptions.method || "GET").toUpperCase();
+  // 读请求遇到 Render/反代的短暂 429 时自动小幅退避重试；写请求默认不重试，避免重复下发手机动作。
+  const max429Retries = retry_429 === undefined ? (method === "GET" ? 2 : 0) : Math.max(0, Math.min(3, Number(retry_429) || 0));
   for (const base of candidateOrder()) {
-    try {
-      const res = await fetch(`${base}${path}`, {
-        ...fetchOptions,
-        signal: fetchOptions.signal || AbortSignal.timeout(timeoutMs),
-        headers: { "X-Auth-Token": LINJIAN_TOKEN, ...(fetchOptions.headers || {}) }
-      });
-      activeLinjianUrl = base;
-      if (!res.ok) {
-        const text = await res.text().catch(() => "");
-        if (res.status === 429) {
-          const retry = res.headers.get("retry-after") || "稍后";
-          throw new Error(`LINJIAN_RATE_LIMITED: 掌心窗后端暂时限流，请等待 ${retry} 后再试。detail=${text || res.statusText}`);
+    for (let attempt = 0; attempt <= max429Retries; attempt++) {
+      try {
+        const res = await fetch(`${base}${path}`, {
+          ...fetchOptions,
+          signal: fetchOptions.signal || AbortSignal.timeout(timeoutMs),
+          headers: { "X-Auth-Token": LINJIAN_TOKEN, ...(fetchOptions.headers || {}) }
+        });
+        activeLinjianUrl = base;
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          if (res.status === 429) {
+            const retryHeader = res.headers.get("retry-after") || "";
+            const retrySeconds = Number(retryHeader);
+            const waitMs = Number.isFinite(retrySeconds)
+              ? Math.max(700, Math.min(5000, retrySeconds * 1000))
+              : Math.min(5000, 900 + attempt * 900);
+            if (attempt < max429Retries) {
+              await new Promise((resolve) => setTimeout(resolve, waitMs));
+              continue;
+            }
+            throw new Error(`LINJIAN_RATE_LIMITED: 掌心窗后端短暂限流，自动重试后仍未恢复。retry_after=${retryHeader || "unknown"} detail=${text || res.statusText}`);
+          }
+          throw new Error(`Linjian server HTTP ${res.status} via ${base}: ${text || res.statusText}`);
         }
-        throw new Error(`Linjian server HTTP ${res.status} via ${base}: ${text || res.statusText}`);
+        return res;
+      } catch (e) {
+        const msg = String(e?.message || e);
+        errors.push(`${base}[attempt=${attempt + 1}]: ${msg}`);
+        if (/^Linjian server HTTP /.test(msg)) throw e;
+        if (msg.startsWith("LINJIAN_RATE_LIMITED:") && attempt >= max429Retries) break;
+        if (attempt >= max429Retries) break;
       }
-      return res;
-    } catch (e) {
-      errors.push(`${base}: ${e?.message || String(e)}`);
-      // HTTP 错误已经连上了后端，继续换地址意义不大，直接报出来。
-      if (/^Linjian server HTTP /.test(String(e?.message || e))) throw e;
     }
   }
   throw new Error(`Linjian server fetch failed. tried=${errors.join(" | ")}`);
@@ -1342,13 +1364,38 @@ function makeServer() {
 
 
 
-  server.tool("get_screen_nodes", "读取当前屏幕无障碍节点：文字、控件类型、可点击状态与 bounds/center 坐标。当用户提到某个按钮、标题、列表项、评论框、发送键、红点位置，或需要陪伴对象看标题后精准点击时主动调用。", {
+  server.tool("get_screen_nodes", "读取当前屏幕无障碍节点：文字、控件类型、可点击状态与 bounds/center 坐标。若当前 App 不暴露无障碍节点，会自动再请求一张当前屏幕截图作为兜底，避免出现“节点为空=什么都看不到”。", {
     device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8)
   }, async ({ device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
     const result = await postCommand({ action: "get_screen_nodes", device_id });
     const id = result?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;
-    return { content: [{ type: "text", text: JSON.stringify({ queued: result, observed_status: observed?.command || null, note: "result 是节点数组 JSON 字符串，包含 text/left/top/right/bottom/center_x/center_y/clickable。" }, null, 2) }] };
+    const command = observed?.command || null;
+    let nodes = null;
+    try {
+      const parsed = JSON.parse(command?.result || "null");
+      if (Array.isArray(parsed)) nodes = parsed;
+    } catch {}
+    if (Array.isArray(nodes) && nodes.length > 0) {
+      return { content: [{ type: "text", text: JSON.stringify({ queued: result, observed_status: command, nodes, fallback: "not_needed", note: "已读取当前屏幕无障碍节点。" }, null, 2) }] };
+    }
+
+    // 某些 App（包括部分 WebView/Compose 页面）会返回空节点；自动走截图兜底。
+    const before = await latestMtime();
+    const shotQueued = await postCommand({ action: "peek", device_id }).catch(() => null);
+    const shotDeadline = Date.now() + Math.max(3000, Math.min(20000, Number(wait_seconds || 8) * 1000));
+    while (Date.now() < shotDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const info = await latestInfo().catch(() => null);
+      if (info && Number(info.mtime || 0) > before) {
+        const img = await fetchLatestImage();
+        return { content: [
+          { type: "text", text: JSON.stringify({ queued: result, observed_status: command, nodes: [], fallback: "fresh_screenshot", screenshot: { filename: info.filename || "latest", size: info.size || img.bytes }, shot_queued: shotQueued, note: "无障碍节点为空，已自动改用当前屏幕截图。" }, null, 2) },
+          { type: "image", mimeType: img.mimeType, data: img.data }
+        ] };
+      }
+    }
+    return { content: [{ type: "text", text: JSON.stringify({ queued: result, observed_status: command, nodes: [], fallback: "screenshot_timeout", shot_queued: shotQueued, note: "无障碍节点为空，截图兜底也未在等待时间内返回；不要据此编造当前页面内容。" }, null, 2) }] };
   });
 
   server.tool("tap_text", "按当前屏幕文字精准点击。会寻找包含/完全匹配 target_text 的无障碍节点，优先点击可点击父节点，否则点击文字中心坐标。当用户说“点一下这个/打开这个/按这个标题/点发送/点评论”等相近表达时主动调用。", {
