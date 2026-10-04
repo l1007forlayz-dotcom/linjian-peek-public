@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-# v0.3.8.8: diary split and scrolling build
+# build current manifest version dynamically
 
 export JAVA_HOME=${JAVA_HOME:-/usr/lib/jvm/java-17-openjdk-amd64}
 export ANDROID_HOME=${ANDROID_HOME:-$HOME/android-sdk}
@@ -10,6 +10,8 @@ BUILD_TOOLS=$ANDROID_HOME/build-tools/34.0.0
 
 PROJECT="$(cd "$(dirname "$0")" && pwd)"
 SRC=$PROJECT/app/src/main
+VERSION_NAME=$(grep -o 'android:versionName="[^"]*"' "$SRC/AndroidManifest.xml" | head -n1 | cut -d'"' -f2)
+APK_NAME="Zhangxinchuang-public-v${VERSION_NAME}.apk"
 OUT=$PROJECT/build
 PKG_PATH=dev/linjian/peek
 
@@ -67,15 +69,15 @@ $BUILD_TOOLS/apksigner sign \
     --ks-pass pass:"$PUBLIC_KS_PASSWORD" \
     --key-pass pass:"$PUBLIC_KS_PASSWORD" \
     --ks-key-alias zhangxinchuang-public \
-    --out "$PROJECT/Zhangxinchuang-public-v0.3.8.8.apk" \
+    --out "$PROJECT/$APK_NAME" \
     app.aligned.apk
 
 echo "=== Verifying fixed public signature ==="
-VERIFY_OUTPUT=$($BUILD_TOOLS/apksigner verify --verbose --print-certs "$PROJECT/Zhangxinchuang-public-v0.3.8.8.apk")
+VERIFY_OUTPUT=$($BUILD_TOOLS/apksigner verify --verbose --print-certs "$PROJECT/$APK_NAME")
 echo "$VERIFY_OUTPUT"
 echo "$VERIFY_OUTPUT" | grep -qi "aea75c9b2b5f5c42d56b72d4a69a79a38e1c57f27db021017be8656bc8f002fb"
 
 echo ""
 echo "=== Done ==="
-echo "APK: $PROJECT/Zhangxinchuang-public-v0.3.8.8.apk"
-ls -lh "$PROJECT/Zhangxinchuang-public-v0.3.8.8.apk"
+echo "APK: $PROJECT/$APK_NAME"
+ls -lh "$PROJECT/$APK_NAME"

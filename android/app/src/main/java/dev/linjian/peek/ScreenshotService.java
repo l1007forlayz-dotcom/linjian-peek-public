@@ -1,6 +1,7 @@
 package dev.linjian.peek;
 
 import android.accessibilityservice.AccessibilityService;
+import android.accessibilityservice.AccessibilityServiceInfo;
 import android.accessibilityservice.GestureDescription;
 import android.app.KeyguardManager;
 import android.content.ClipData;
@@ -93,8 +94,22 @@ public class ScreenshotService extends AccessibilityService {
     @Override public void onServiceConnected() {
         super.onServiceConnected();
         instance = this;
+        try {
+            AccessibilityServiceInfo info = getServiceInfo();
+            if (info != null) {
+                info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS;
+                info.flags |= AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+                info.flags |= AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR2) {
+                    info.flags |= AccessibilityServiceInfo.FLAG_REQUEST_ENHANCED_WEB_ACCESSIBILITY;
+                }
+                setServiceInfo(info);
+            }
+        } catch (Exception e) {
+            DebugState.append(this, "无障碍读取增强配置失败：" + shortMsg(e));
+        }
         NowState.start(this);
-        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏可用 v0.3.8.3");
+        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏可用 v0.3.8.10");
         watchdog = new Handler(Looper.getMainLooper());
         watchdog.postDelayed(watchdogTick, 15000);
         startBackgroundPolling();
@@ -268,9 +283,7 @@ public class ScreenshotService extends AccessibilityService {
 
     private int collect(AccessibilityNodeInfo node, StringBuilder sb, JSONArray nodes, int depth, int count) {
         if (node == null || count > 140 || depth > 14) return count;
-        CharSequence text = node.getText();
-        CharSequence desc = node.getContentDescription();
-        String value = text != null && text.length() > 0 ? text.toString() : (desc != null && desc.length() > 0 ? desc.toString() : "");
+        String value = nodeText(node);
         if (value.length() > 0) {
             if (sb.length() < 2600) sb.append(value).append(" | ");
             try {
@@ -333,10 +346,27 @@ public class ScreenshotService extends AccessibilityService {
     }
 
     private String nodeText(AccessibilityNodeInfo node) {
-        CharSequence text = node.getText();
-        CharSequence desc = node.getContentDescription();
-        if (text != null && text.length() > 0) return text.toString();
-        if (desc != null && desc.length() > 0) return desc.toString();
+        if (node == null) return "";
+        try {
+            CharSequence text = node.getText();
+            if (text != null && text.length() > 0) return text.toString();
+            CharSequence desc = node.getContentDescription();
+            if (desc != null && desc.length() > 0) return desc.toString();
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                CharSequence hint = node.getHintText();
+                if (hint != null && hint.length() > 0) return hint.toString();
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                CharSequence pane = node.getPaneTitle();
+                if (pane != null && pane.length() > 0) return pane.toString();
+                CharSequence tip = node.getTooltipText();
+                if (tip != null && tip.length() > 0) return tip.toString();
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                CharSequence state = node.getStateDescription();
+                if (state != null && state.length() > 0) return state.toString();
+            }
+        } catch (Exception ignored) { }
         return "";
     }
 
