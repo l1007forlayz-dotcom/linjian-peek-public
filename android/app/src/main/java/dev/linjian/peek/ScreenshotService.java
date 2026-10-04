@@ -2,6 +2,7 @@ package dev.linjian.peek;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
+import android.app.KeyguardManager;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Context;
@@ -102,12 +103,25 @@ public class ScreenshotService extends AccessibilityService {
     @Override public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
         CharSequence pkg = event.getPackageName();
-        if (pkg != null) currentPackage = pkg.toString();
         int t = event.getEventType();
-        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || t == AccessibilityEvent.TYPE_VIEW_SCROLLED) updateScreenText();
+
+        // 不再让状态栏/通知栏的内容变化把真正前台 App 覆盖成 com.android.systemui。
+        // App 切换时先记事件包名，随后 updateScreenText() 会用真实应用窗口再次校正。
         if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkg != null) {
-            ActivityEventStore.recordForegroundChange(this, pkg.toString());
-            AppGate.onForegroundPackage(this, pkg.toString());
+            String p = pkg.toString();
+            if (!"com.android.systemui".equals(p) || isKeyguardLockedNow()) currentPackage = p;
+        }
+
+        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || t == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+            updateScreenText();
+        }
+
+        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            String actual = currentPackage();
+            if (actual != null && !actual.isEmpty()) {
+                ActivityEventStore.recordForegroundChange(this, actual);
+                AppGate.onForegroundPackage(this, actual);
+            }
         }
     }
     @Override public void onInterrupt() { DebugState.append(this, "无障碍服务被中断"); }
@@ -165,77 +179,89 @@ public class ScreenshotService extends AccessibilityService {
 
     public void refreshScreenModel() { updateScreenText(); }
 
-    private void updateScreenText() {
-        AccessibilityNodeInfo activeRoot = null;
+    private boolean isKeyguardLockedNow() {
         try {
-            StringBuilder sb = new StringBuilder();
-            JSONArray nodes = new JSONArray();
+            KeyguardManager km = (KeyguardManager) getSystemService(Context.KEYGUARD_SERVICE);
+            return km != null && km.isKeyguardLocked();
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
 
-            activeRoot = getRootInActiveWindow();
-            collect(activeRoot, sb, nodes, 0, 0);
+    private AccessibilityNodeInfo bestApplicationWindowRoot() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return null;
+        AccessibilityNodeInfo best = null;
+        long bestScore = Long.MIN_VALUE;
+        try {
+            java.util.List<AccessibilityWindowInfo> windows = getWindows();
+            if (windows == null) return null;
+            for (AccessibilityWindowInfo window : windows) {
+                AccessibilityNodeInfo candidate = null;
+                try {
+                    if (window == null || window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION) continue;
+                    candidate = window.getRoot();
+                    if (candidate == null) continue;
 
-            // Android 偶尔会把输入法、系统浮层或空窗口当成 active root，
-            // 导致明明屏幕有内容却得到 []。节点为空时，从可交互窗口里
-            // 再找一次当前前台 App 的 root；找不到匹配包名时再尝试其它窗口。
-            if (nodes.length() == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                java.util.List<AccessibilityWindowInfo> windows = getWindows();
-                if (windows != null && !windows.isEmpty()) {
-                    String targetPackage = currentPackage();
-                    boolean foundReadable = false;
+                    CharSequence pkgCs = candidate.getPackageName();
+                    String pkg = pkgCs == null ? "" : pkgCs.toString();
+                    if (pkg.isEmpty() || getPackageName().equals(pkg)) continue;
 
-                    // 第一轮只读当前前台包，避免先捞到输入法/系统浮层。
-                    if (targetPackage != null && !targetPackage.isEmpty()) {
-                        for (AccessibilityWindowInfo window : windows) {
-                            AccessibilityNodeInfo candidate = null;
-                            try {
-                                candidate = window == null ? null : window.getRoot();
-                                CharSequence pkg = candidate == null ? null : candidate.getPackageName();
-                                if (candidate != null && pkg != null && targetPackage.equals(pkg.toString())) {
-                                    collect(candidate, sb, nodes, 0, 0);
-                                    if (nodes.length() > 0) {
-                                        foundReadable = true;
-                                        break;
-                                    }
-                                }
-                            } catch (Exception ignored) {
-                            } finally {
-                                if (candidate != null && candidate != activeRoot) {
-                                    try { candidate.recycle(); } catch (Exception ignored) { }
-                                }
-                            }
+                    Rect bounds = new Rect();
+                    window.getBoundsInScreen(bounds);
+                    long area = Math.max(0L, (long) bounds.width()) * Math.max(0L, (long) bounds.height());
+                    long score = area;
+                    if (!"com.android.systemui".equals(pkg)) score += 1_000_000_000_000L;
+                    if (window.isActive()) score += 200_000_000_000L;
+                    if (window.isFocused()) score += 100_000_000_000L;
+
+                    if (score > bestScore) {
+                        if (best != null) {
+                            try { best.recycle(); } catch (Exception ignored) { }
                         }
+                        best = candidate;
+                        candidate = null;
+                        bestScore = score;
                     }
-
-                    // 某些页面 currentPackage 会短暂落在系统界面；再尝试 active/focused 窗口。
-                    if (!foundReadable && nodes.length() == 0) {
-                        for (AccessibilityWindowInfo window : windows) {
-                            AccessibilityNodeInfo candidate = null;
-                            try {
-                                if (window == null || (!window.isActive() && !window.isFocused())) continue;
-                                candidate = window.getRoot();
-                                collect(candidate, sb, nodes, 0, 0);
-                                if (nodes.length() > 0) break;
-                            } catch (Exception ignored) {
-                            } finally {
-                                if (candidate != null && candidate != activeRoot) {
-                                    try { candidate.recycle(); } catch (Exception ignored) { }
-                                }
-                            }
-                        }
+                } catch (Exception ignored) {
+                } finally {
+                    if (candidate != null) {
+                        try { candidate.recycle(); } catch (Exception ignored) { }
                     }
                 }
             }
+        } catch (Exception e) {
+            DebugState.append(this, "枚举应用窗口异常：" + shortMsg(e));
+        }
+        return best;
+    }
+
+    private void updateScreenText() {
+        AccessibilityNodeInfo root = null;
+        try {
+            // 解锁状态下优先读取真正的 TYPE_APPLICATION 窗口。
+            // 这样状态栏/通知栏产生事件时，也不会把读屏目标误判成 SystemUI。
+            if (!isKeyguardLockedNow()) root = bestApplicationWindowRoot();
+            if (root == null) root = getRootInActiveWindow();
+
+            StringBuilder sb = new StringBuilder();
+            JSONArray nodes = new JSONArray();
+            collect(root, sb, nodes, 0, 0);
+
+            CharSequence pkgCs = root == null ? null : root.getPackageName();
+            String resolvedPackage = pkgCs == null ? "" : pkgCs.toString();
+            if (!resolvedPackage.isEmpty()) currentPackage = resolvedPackage;
 
             screenText = sb.length() > 2400 ? sb.substring(0, 2400) : sb.toString();
             screenNodesJson = nodes.toString();
+
             if (nodes.length() == 0) {
-                DebugState.append(this, "读屏节点为空：activeRoot=" + (activeRoot != null) + " currentPackage=" + currentPackage());
+                DebugState.append(this, "读屏节点为空：root=" + (root != null) + " currentPackage=" + currentPackage());
             }
         } catch (Exception e) {
             DebugState.append(this, "读屏模型刷新异常：" + shortMsg(e));
         } finally {
-            if (activeRoot != null) {
-                try { activeRoot.recycle(); } catch (Exception ignored) { }
+            if (root != null) {
+                try { root.recycle(); } catch (Exception ignored) { }
             }
         }
     }
