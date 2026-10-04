@@ -141,6 +141,11 @@ public class MainActivity extends Activity {
         loadSettings();
         NowState.start(this);
 
+        findViewById(R.id.statusOverlayButton).setOnClickListener(v -> StatusOverlaySettings.show(this));
+        if (getIntent().getBooleanExtra("open_status_overlay", false)) {
+            getWindow().getDecorView().post(() -> StatusOverlaySettings.show(this));
+        }
+
         DebugState.append(this, "掌心窗公开版 v0.3.8.8 已打开");
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 13);
         serviceRunning = CompanionService.isRunning();
@@ -2170,7 +2175,7 @@ public class MainActivity extends Activity {
 
     private int dp(float v) { return (int) (v * getResources().getDisplayMetrics().density + 0.5f); }
 
-    @Override protected void onResume() { super.onResume(); serviceRunning = CompanionService.isRunning(); PixelPetOverlay.sync(this); updateUI(); if (recentlyOpenedAccessibilitySettings()) scheduleAccessibilityFollowupChecks(); uiHandler.removeCallbacks(refreshTick); uiHandler.post(refreshTick); }
+    @Override protected void onResume() { super.onResume(); serviceRunning = CompanionService.isRunning(); PixelPetOverlay.sync(this); StatusOverlayService.restore(this); updateUI(); if (recentlyOpenedAccessibilitySettings()) scheduleAccessibilityFollowupChecks(); uiHandler.removeCallbacks(refreshTick); uiHandler.post(refreshTick); }
     @Override protected void onPause() { saveConnectionSettingsOnly(true); uiHandler.removeCallbacks(refreshTick); super.onPause(); }
     @Override protected void onStop() { saveConnectionSettingsOnly(true); super.onStop(); }
 
