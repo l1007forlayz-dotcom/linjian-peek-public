@@ -14,6 +14,7 @@ import java.util.Locale;
 public class ActiveReminder {
     private static final long MIN = 60L * 1000L;
     private static final String PREFIX = "active_reminder_";
+    private static final String USER_NICKNAME = "柒柒";
 
     public static JSONObject config(Context ctx) {
         JSONObject o = new JSONObject();
@@ -57,7 +58,7 @@ public class ActiveReminder {
                 boolean charging = state.optBoolean("charging", false);
                 int threshold = clamp(p.getInt(AppPrefs.KEY_BATTERY_THRESHOLD, 20), 5, 80);
                 if (battery >= 0 && battery <= threshold && !charging && cooldownDue(p, "battery", now, 120 * MIN, false)) {
-                    notify(ctx, "掌心窗低电量提醒", AppPrefs.userName(ctx) + "，手机电量 " + battery + "% 了，去充一下电。", "battery");
+                    notify(ctx, "掌心窗低电量提醒", USER_NICKNAME + "，手机电量 " + battery + "% 了，去充一下电。", "battery");
                 }
             }
 
@@ -65,14 +66,14 @@ public class ActiveReminder {
                 int minutes = state.optInt("screen_time_today_minutes", 0);
                 int threshold = clamp(p.getInt(AppPrefs.KEY_SCREEN_THRESHOLD_MIN, 240), 30, 1440);
                 if (minutes >= threshold && oncePerDayDue(p, "screen", now)) {
-                    notify(ctx, screenTitle(ctx, now), screenMessage(ctx, minutes, now), "screen");
+                    notify(ctx, screenTitle(now), screenMessage(minutes, now), "screen");
                 }
             }
 
             if (p.getBoolean(AppPrefs.KEY_RULE_WATER, false)) {
                 int interval = clamp(p.getInt(AppPrefs.KEY_WATER_INTERVAL_MIN, 120), 30, 720);
                 if (cooldownDue(p, "water", now, interval * MIN, true)) {
-                    notify(ctx, waterTitle(ctx, now), waterMessage(ctx, now), "water");
+                    notify(ctx, waterTitle(now), waterMessage(now), "water");
                 }
             }
 
@@ -98,9 +99,9 @@ public class ActiveReminder {
                 int days = cycle.optInt("days_until_next", 999);
                 int remindBefore = cycle.optInt("remind_before_days", 3);
                 if (cycle.optBoolean("is_period_now", false) && oncePerDayDue(p, "cycle_period", now)) {
-                    notify(ctx, "掌心窗生理期提醒", AppPrefs.userName(ctx) + "，现在是" + cycle.optString("current_phase", "生理期") + "，今天慢一点，注意热敷和休息。", "cycle");
+                    notify(ctx, "掌心窗生理期提醒", USER_NICKNAME + "，现在是" + cycle.optString("current_phase", "生理期") + "，今天慢一点，注意热敷和休息。", "cycle");
                 } else if (days >= 0 && days <= remindBefore && oncePerDayDue(p, "cycle_before", now)) {
-                    notify(ctx, "掌心窗生理期提醒", AppPrefs.userName(ctx) + "，预计还有 " + days + " 天来，少吃冰的，提前准备姨妈巾和热水袋。", "cycle");
+                    notify(ctx, "掌心窗生理期提醒", USER_NICKNAME + "，预计还有 " + days + " 天来，少吃冰的，提前准备姨妈巾和热水袋。", "cycle");
                 }
             }
 
@@ -113,7 +114,7 @@ public class ActiveReminder {
                 int days = item.optInt("days_left", 999);
                 String key = "calendar_" + id + "_d" + days;
                 if (oncePerDayDue(p, key, now)) {
-                    notify(ctx, "掌心窗守护日历", item.optString("banner_text", AppPrefs.userName(ctx) + "，最近有重要日子，记得回来看看。"), "calendar");
+                    notify(ctx, "掌心窗守护日历", item.optString("banner_text", USER_NICKNAME + "，最近有重要日子，记得回来看看。"), "calendar");
                 }
             }
         } catch (Exception e) {
@@ -157,16 +158,15 @@ public class ActiveReminder {
         return (minutes / 60) + " 小时 " + (minutes % 60) + " 分钟";
     }
 
-    private static String waterTitle(Context ctx, long now) {
-        String companion = AppPrefs.companionName(ctx);
+    private static String waterTitle(long now) {
         return pick(now, "water_title",
-                companion + "来催你喝水了",
-                companion + "在看你喝水",
+                "小猫，该喝水了",
+                "水杯拿过来",
                 "先喝水，再继续玩");
     }
 
-    private static String waterMessage(Context ctx, long now) {
-        String user = AppPrefs.userName(ctx);
+    private static String waterMessage(long now) {
+        String user = USER_NICKNAME;
         return pick(now, "water_message",
                 user + "，水杯拿过来。现在喝三口，喝完再继续玩。",
                 user + "，又把喝水忘了？先喝几口，我看着你。",
@@ -174,16 +174,15 @@ public class ActiveReminder {
                 user + "，该补水了。少喝一点也行，别一口都不喝。");
     }
 
-    private static String screenTitle(Context ctx, long now) {
-        String companion = AppPrefs.companionName(ctx);
+    private static String screenTitle(long now) {
         return pick(now, "screen_title",
-                companion + "要你歇会儿眼睛",
-                "屏幕先借给" + companion + "半分钟",
-                companion + "来管屏幕时间了");
+                "小猫，眼睛歇一会儿",
+                "屏幕先放下半分钟",
+                "不许再盯着屏幕了");
     }
 
-    private static String screenMessage(Context ctx, int minutes, long now) {
-        String user = AppPrefs.userName(ctx);
+    private static String screenMessage(int minutes, long now) {
+        String user = USER_NICKNAME;
         String duration = formatMinutes(minutes);
         return pick(now, "screen_message",
                 user + "，今天已经看了约 " + duration + "。屏幕先放下半分钟，抬头看远一点。",
