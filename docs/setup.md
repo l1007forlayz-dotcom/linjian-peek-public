@@ -1,4 +1,6 @@
-# 掌心窗公开版安装与部署流程（v0.3.7.3）
+# 掌心窗公开版安装与部署流程（v0.3.8.6）
+
+本版新增「TA 的日记」页边纸条批注，打包时请确认版本名 `0.3.8.6`、版本码 `30806`，并沿用固定签名。
 
 ## 1. 选择部署方式
 
@@ -139,7 +141,7 @@ http://127.0.0.1:8787/sse
 构建产物：
 
 ```text
-android/Zhangxinchuang-public-v0.3.7.3.apk
+android/Zhangxinchuang-public-v0.3.8.6.apk
 ```
 
 公开版使用固定签名 `android/signing/zhangxinchuang-public-release.p12`，不要删除或替换。

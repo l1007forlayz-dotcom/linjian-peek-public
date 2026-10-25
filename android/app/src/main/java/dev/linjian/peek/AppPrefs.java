@@ -11,8 +11,8 @@ import java.util.Map;
 
 public class AppPrefs {
     public static final String PREFS = "linjian_peek";
-    public static final String APP_VERSION_NAME = "0.3.8.10";
-    public static final int APP_VERSION_CODE = 30810;
+    public static final String APP_VERSION_NAME = "0.3.9.1";
+    public static final int APP_VERSION_CODE = 30901;
     public static final String KEY_SERVER = "server_url";
     public static final String KEY_TOKEN = "token";
     public static final String KEY_DEVICE = "device_id";
@@ -65,6 +65,7 @@ public class AppPrefs {
     public static final String KEY_HOME_COOLDOWN_MIN = "home_mode_cooldown_min";
     public static final String KEY_HOME_TARGET_PACKAGE = "home_mode_target_package";
     public static final String DEFAULT_HOME_TARGET_PACKAGE = "";
+    public static final String DEFAULT_HOME_WATCH_PACKAGES = "com.ss.android.ugc.aweme,com.xingin.xhs";
 
     public static SharedPreferences get(Context ctx) { return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
@@ -80,6 +81,11 @@ public class AppPrefs {
     }
 
     public static boolean migrateLegacyConfig(Context ctx) { return false; }
+    public static String cleanUrl(String raw) { return cleanServer(raw); }
+    public static String[] candidateServers(Context ctx) {
+        String server = server(ctx);
+        return server.length() == 0 ? new String[0] : new String[]{server};
+    }
     public static String server(Context ctx) { return cleanServer(get(ctx).getString(KEY_SERVER, "")); }
     public static String token(Context ctx) { return get(ctx).getString(KEY_TOKEN, ""); }
     public static String device(Context ctx) { return get(ctx).getString(KEY_DEVICE, "android-phone"); }
@@ -170,6 +176,36 @@ public class AppPrefs {
             out.append(app.getKey()).append("|").append(app.getValue()).append("\n");
         }
         return out.toString().trim();
+    }
+
+    public static String homeWatchPackages(Context ctx) {
+        SharedPreferences prefs = get(ctx);
+        String saved = normalizePackageCsv(prefs.getString(KEY_HOME_WATCH_PACKAGES, ""));
+        if (!saved.isEmpty()) return saved;
+        StringBuilder fromTargets = new StringBuilder();
+        for (String pkg : targetApps(ctx).values()) {
+            if (!isPackageLike(pkg)) continue;
+            if (fromTargets.length() > 0) fromTargets.append(',');
+            fromTargets.append(pkg.trim());
+        }
+        String normalized = normalizePackageCsv(fromTargets.toString());
+        return normalized.isEmpty() ? DEFAULT_HOME_WATCH_PACKAGES : normalized;
+    }
+
+    public static String normalizePackageCsv(String raw) {
+        LinkedHashMap<String, String> packages = new LinkedHashMap<>();
+        String source = raw == null ? "" : raw;
+        for (String part : source.split("[,，\n ]+")) {
+            String pkg = part == null ? "" : part.trim();
+            if (!isPackageLike(pkg)) continue;
+            packages.put(pkg, pkg);
+        }
+        StringBuilder out = new StringBuilder();
+        for (String pkg : packages.values()) {
+            if (out.length() > 0) out.append(',');
+            out.append(pkg);
+        }
+        return out.toString();
     }
 
     public static String normalizeTargetApps(String raw) {

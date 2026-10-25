@@ -41,11 +41,33 @@ public class LockActivity extends Activity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent);
         if (intent != null && intent.getStringExtra("package") != null) pkg = intent.getStringExtra("package");
+        AppGate.markLockActivityVisible(pkg, true);
         refresh();
     }
 
-    @Override protected void onResume() { super.onResume(); handler.removeCallbacks(tick); handler.post(tick); }
-    @Override protected void onPause() { handler.removeCallbacks(tick); super.onPause(); }
+    @Override protected void onResume() {
+        super.onResume();
+        AppGate.markLockActivityVisible(pkg, true);
+        handler.removeCallbacks(tick);
+        handler.post(tick);
+    }
+
+    @Override protected void onPause() {
+        handler.removeCallbacks(tick);
+        AppGate.markLockActivityVisible(pkg, false);
+        super.onPause();
+    }
+
+    @Override protected void onDestroy() {
+        AppGate.markLockActivityVisible(pkg, false);
+        super.onDestroy();
+    }
+
+    @Override public void onBackPressed() {
+        ScreenshotService svc = ScreenshotService.getInstance();
+        if (svc != null) svc.doHome();
+        Toast.makeText(this, "还在门禁时间内，先回到桌面休息一下", Toast.LENGTH_SHORT).show();
+    }
 
     private void buildUi() {
         ScrollView scroll = new ScrollView(this);

@@ -97,8 +97,12 @@ const DEFAULT_EMOTION_STATE = {
   updated_at: new Date().toISOString()
 };
 
-function textResult(obj) {
-  return { content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+function textResult(obj, isError = false) {
+  return { isError, content: [{ type: "text", text: JSON.stringify(obj, null, 2) }] };
+}
+function contentResult(content = [], isError = false, structuredContent = undefined) {
+  const safeContent = Array.isArray(content) ? content : (content ? [content] : []);
+  return { isError, content: safeContent, ...(structuredContent === undefined ? {} : { structuredContent }) };
 }
 
 const KNOWN_APP_PACKAGES = {
@@ -900,7 +904,30 @@ async function runWalletCommand(action, args = {}, waitSeconds = DEFAULT_COMMAND
   const id = queued?.command?.id;
   const observed = id ? await waitCommand(id, waitSeconds) : null;
   const command = observed?.command || queued?.command || null;
-  return { ok: command?.status === "completed", queued, observed_status: command, phone_result: parsePhoneResult(command), note: "小金库数据默认保存在手机本地；写入与指定月份读取通过手机端命令完成。" };
+  const status = String(command?.status || "");
+  const phoneResult = parsePhoneResult(command);
+  const phoneConfirmed = status === "completed" || status === "failed";
+  const phoneOk = status === "completed" && !(phoneResult && typeof phoneResult === "object" && phoneResult.ok === false);
+  const waiting = !phoneConfirmed;
+  return {
+    ok: phoneOk,
+    queued_ok: Boolean(queued?.ok || queued?.queued),
+    phone_confirmed: phoneConfirmed,
+    waiting_phone_confirmation: waiting,
+    confirmation_state: phoneOk ? "phone_completed" : (status === "failed" ? "phone_failed" : "waiting_phone_confirmation"),
+    display_status: phoneOk ? "审批结果已写入掌心窗" : (waiting ? "已发送到手机，等待手机确认" : "手机端执行失败"),
+    queued,
+    observed_status: command,
+    phone_result: phoneResult,
+    note: waiting
+      ? "queued.ok 只代表服务端排队成功，不代表掌心窗已写入。请等待 completed_at / phone_result 后再显示最终成功。"
+      : "小金库数据默认保存在手机本地；写入与指定月份读取通过手机端命令完成。"
+  };
+}
+
+function walletResult(obj) {
+  const shouldMarkError = Boolean(obj && obj.ok === false && (obj.waiting_phone_confirmation || obj.confirmation_state === "phone_failed"));
+  return textResult(obj, shouldMarkError);
 }
 
 function walletMonthStateFromCache(wallet, month = "") {
@@ -947,7 +974,7 @@ function walletApprovalSummary(records = []) {
 
 
 
-// v0.3.8.1：部分 MCP 客户端会缓存或截断工具 schema，导致后加的小金库/外卖工具在 /health 里存在，
+// v0.3.9.1：部分 MCP 客户端会缓存或截断工具 schema，导致后加的小金库/外卖工具在 /health 里存在，
 // 但在 ChatGPT 工具面板里没有完全暴露。这里提供两层修复：
 // 1）在普通 /mcp 里靠前暴露一个统一入口 wallet_takeout_action，单独工具没刷出来时也能调用。
 // 2）新增 /mcp-wallet 专用端点，只暴露小金库 + 外卖助手相关工具，避免工具过多时被客户端截断。
@@ -980,7 +1007,8 @@ const READ_ONLY_TOOLS = new Set([
   "linjian_status", "latest_screen", "get_phone_state", "get_life_state", "get_senses_state",
   "get_window_whisper", "get_companion_actions", "get_activity_events", "get_guardian_calendar",
   "list_guardian_days", "list_diary_books", "list_diary_entries", "read_diary_entry",
-  "search_diary_entries", "get_guidian_state", "get_care_policy", "get_care_history",
+  "search_diary_entries", "list_diary_annotations", "read_diary_entry_with_annotations",
+  "get_guidian_state", "get_care_policy", "get_care_history",
   "get_last_visit", "get_visit_history", "get_visit_stats", "active_care_check",
   "get_companion_emotion", "list_calendar_notes",
   "get_weather_state", "list_known_apps", "get_screen_break_state", "get_lock_state",
@@ -992,7 +1020,7 @@ const READ_ONLY_TOOLS = new Set([
 ]);
 
 const DESTRUCTIVE_TOOLS = new Set([
-  "delete_guardian_day", "delete_diary_entry", "delete_diary_book", "delete_wallet_record",
+  "delete_guardian_day", "delete_diary_entry", "delete_diary_book", "delete_diary_annotation", "delete_wallet_record",
   "delete_takeout_card", "remove_takeout_card", "remove_screen_break_app", "remove_locked_app",
   "phone_screen_off"
 ]);
@@ -1085,10 +1113,10 @@ function registerWalletTakeoutTools(server, { includeUnified = false } = {}) {
     const records = result?.phone_result?.approval_records || result?.phone_result?.approvals || result?.phone_result?.records || [];
     return textResult({ ...result, filtered_records: filterWalletApprovals(records, requester_role, status), summary: walletApprovalSummary(records) });
   });
-  server.tool("decide_wallet_approval", "保存一条小金库申请的处理结果和备注。兼容旧名称。", { id: z.string(), decision: z.string().default("approved"), message: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("decide_wallet_approval", args, args.wait_seconds)));
-  server.tool("save_wallet_request_result", "保存一条小金库申请的处理结果和备注。status 可填 ok / hold / no；note 为显示在申请详情中的备注。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("save_wallet_request_result", args, args.wait_seconds)));
-  server.tool("save_user_wallet_request_result", "在用户明确同意后，保存用户对陪伴者申请的处理结果。status 可填 ok / hold / no；note 写用户给出的理由。此工具用于聊天确认后的写回，不需要控制用户屏幕。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("save_user_wallet_request_result", args, args.wait_seconds)));
-  server.tool("update_wallet_request_result", "保存或更新一条小金库申请的处理结果。兼容 save_wallet_request_result。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("update_wallet_request_result", args, args.wait_seconds)));
+  server.tool("decide_wallet_approval", "保存一条小金库申请的处理结果和备注。兼容旧名称。", { id: z.string(), decision: z.string().default("approved"), message: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => walletResult(await runWalletCommand("decide_wallet_approval", args, args.wait_seconds)));
+  server.tool("save_wallet_request_result", "保存一条小金库申请的处理结果和备注。status 可填 ok / hold / no；note 为显示在申请详情中的备注。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => walletResult(await runWalletCommand("save_wallet_request_result", args, args.wait_seconds)));
+  server.tool("save_user_wallet_request_result", "在用户明确同意后，保存用户对陪伴者申请的处理结果。status 可填 ok / hold / no；note 写用户给出的理由。此工具用于聊天确认后的写回，不需要控制用户屏幕。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => walletResult(await runWalletCommand("save_user_wallet_request_result", args, args.wait_seconds)));
+  server.tool("update_wallet_request_result", "保存或更新一条小金库申请的处理结果。兼容 save_wallet_request_result。", { id: z.string(), status: z.string().default("ok"), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => walletResult(await runWalletCommand("update_wallet_request_result", args, args.wait_seconds)));
   server.tool("confirm_wallet_record", "确认、忽略或修改一条小金库待确认账单。", { id: z.string(), decision: z.string().default("confirm"), amount: z.number().default(0), category: z.string().default(""), note: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("confirm_wallet_record", args, args.wait_seconds)));
   server.tool("get_wallet_rules", "读取小金库预算规则和自动识别模式。", { device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async ({ device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => textResult(await runWalletCommand("get_wallet_rules", { device_id }, wait_seconds)));
   server.tool("set_wallet_rules", "设置小金库预算、审批线、自动识别模式和分类上限。", { monthly_budget: z.number().default(0), approval_threshold: z.number().default(0), auto_mode: z.string().default(""), category_limits: z.string().default(""), deep_night_reminder: z.boolean().default(true), device_id: z.string().default(DEFAULT_DEVICE), wait_seconds: z.number().int().min(3).max(20).default(8) }, async (args) => textResult(await runWalletCommand("set_wallet_rules", args, args.wait_seconds)));
@@ -1121,20 +1149,20 @@ function registerWalletTakeoutTools(server, { includeUnified = false } = {}) {
 }
 
 function makeWalletTakeoutServer() {
-  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗小金库外卖", version: "0.3.8.3" }));
+  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗小金库外卖", version: "0.3.9.1" }));
   server.tool("linjian_status", "检查掌心窗后端、MCP 配置，以及当前是否使用小金库/外卖专用 schema。", {}, async () => {
     const configErrors = [];
     if (!LINJIAN_URL_CANDIDATES.length) configErrors.push("Missing env LINJIAN_URL");
     if (!LINJIAN_TOKEN) configErrors.push("Missing env LINJIAN_TOKEN");
     const health = configErrors.length ? { ok: false, error: configErrors.join("; ") } : await linjianFetch("/health").then((r) => r.json()).catch((e) => ({ ok: false, error: String(e) }));
-    return textResult({ ok: true, schema_mode: "wallet_takeout_only", version: "0.3.8.3", has_url: Boolean(LINJIAN_URL_CANDIDATES.length), has_token: Boolean(LINJIAN_TOKEN), linjian_url: effectiveLinjianUrl(), health, tools: Array.from(WALLET_TAKEOUT_ACTIONS), note: "如果普通 /mcp 里新增工具没有暴露，请让 AI 客户端连接 /mcp-wallet。" });
+    return textResult({ ok: true, schema_mode: "wallet_takeout_only", version: "0.3.9.1", has_url: Boolean(LINJIAN_URL_CANDIDATES.length), has_token: Boolean(LINJIAN_TOKEN), linjian_url: effectiveLinjianUrl(), health, tools: Array.from(WALLET_TAKEOUT_ACTIONS), note: "如果普通 /mcp 里新增工具没有暴露，请让 AI 客户端连接 /mcp-wallet。" });
   });
   registerWalletTakeoutTools(server, { includeUnified: true });
   return server;
 }
 
 function makeServer() {
-  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗", version: "0.3.8.3" }));
+  const server = addChatGptToolMetadata(new McpServer({ name: "掌心窗", version: "0.3.9.1" }));
   const commandBackedTools = new Set([
     "peek_screen", "get_screen_nodes", "tap_text", "input_text", "draft_xhs_comment", "xhs_comment", "send_visible_comment_after_confirmation",
     "add_guardian_calendar_event", "add_calendar_note", "react_calendar_note", "care_action", "trigger_guidian", "mark_guidian_returned",
@@ -1169,7 +1197,7 @@ function makeServer() {
   };
 
 
-  // v0.3.8.1：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。
+  // v0.3.9.1：专注模式工具靠前注册，避免部分客户端只读取前若干个 schema 时漏掉接口。
   server.tool("get_focus_status", "读取手机端专注模式 Focus Mode 状态：是否开启、目标、剩余时间、留言、应急次数。用户问专注模式、锁手机、全机专注、留言给他时优先调用。", {
     device_id: z.string().default(DEFAULT_DEVICE)
   }, async ({ device_id = DEFAULT_DEVICE }) => {
@@ -1196,7 +1224,9 @@ function makeServer() {
     const id = queued?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;
     await postCompanionAction("start_focus_mode", { summary: `开启专注模式 ${duration_minutes} 分钟：${target}` });
-    return textResult({ ok: observed?.command?.status === "completed" || queued?.queued === true || queued?.ok === true, action_done: "已下发专注模式", queued, observed_status: observed?.command || null, focus_plan: payload });
+    const executed = observed?.command?.status === "completed";
+    const queuedOk = queued?.queued === true || queued?.ok === true;
+    return textResult({ ok: executed, queued_ok: queuedOk, action_done: executed ? "已开启专注模式" : "专注模式命令已入队，等待手机执行器确认", queued, observed_status: observed?.command || null, focus_plan: payload });
   });
 
   server.tool("end_focus_mode", "结束当前全机专注模式。仅在用户明确要求结束/测试完成/解除专注时调用。", {
@@ -1209,7 +1239,9 @@ function makeServer() {
     const id = queued?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;
     await postCompanionAction("end_focus_mode");
-    return textResult({ ok: observed?.command?.status === "completed" || queued?.queued === true || queued?.ok === true, action_done: "已下发结束专注", queued, observed_status: observed?.command || null });
+    const executed = observed?.command?.status === "completed";
+    const queuedOk = queued?.queued === true || queued?.ok === true;
+    return textResult({ ok: executed, queued_ok: queuedOk, action_done: executed ? "已结束专注" : "结束专注命令已入队，等待手机执行器确认", queued, observed_status: observed?.command || null });
   });
 
   server.tool("set_focus_plan", "保存专注模式计划：目标、守护文案、应急次数等。不会立即开始，除非用户要求开始专注时应调用 start_focus_mode。", {
@@ -1226,7 +1258,9 @@ function makeServer() {
     const id = queued?.command?.id;
     const observed = id ? await waitCommand(id, wait_seconds) : null;
     await postCompanionAction("set_focus_plan");
-    return textResult({ ok: observed?.command?.status === "completed" || queued?.queued === true || queued?.ok === true, action_done: "已保存专注计划", queued, observed_status: observed?.command || null, focus_plan: payload });
+    const executed = observed?.command?.status === "completed";
+    const queuedOk = queued?.queued === true || queued?.ok === true;
+    return textResult({ ok: executed, queued_ok: queuedOk, action_done: executed ? "已保存专注计划" : "专注计划命令已入队，等待手机执行器确认", queued, observed_status: observed?.command || null, focus_plan: payload });
   });
 
   server.tool("reply_focus_request", "给专注页中的留言保存一条回复。公开版页面默认叫“留言给他”，不保证实时显示；主要用于让后端/手机端保留陪伴对象对留言的回应。", {
@@ -1280,22 +1314,22 @@ function makeServer() {
         const info = await latestInfo().catch(() => null);
         if (info && Number(info.mtime || 0) > before) {
           const img = await fetchLatestImage();
-          return { content: [
+          return contentResult([
             { type: "text", text: `掌心窗已收到新截图：${info.filename || "latest"}，大小约 ${info.size || img.bytes} bytes。` },
             { type: "image", data: img.data, mimeType: img.mimeType }
-          ] };
+          ], false, { ok: true, filename: info.filename || "latest", size: info.size || img.bytes, mtime: info.mtime || "", content_type: img.mimeType, source: "peek_screen" });
         }
       }
-      return { content: [{ type: "text", text: `等待 ${wait_seconds} 秒后还没有收到新截图。请检查：手机 App 是否点了启动、无障碍权限是否开启、服务器地址和 Token 是否一致、Render 是否刚从休眠中醒来。` }], isError: true };
+      return contentResult([{ type: "text", text: `等待 ${wait_seconds} 秒后还没有收到新截图。请检查：手机 App 是否点了启动、无障碍权限是否开启、服务器地址和 Token 是否一致、Render 是否刚从休眠中醒来。` }], true);
     }
   );
 
   server.tool("latest_screen", "不敲门，直接读取服务器里最近一次掌心窗截图。当用户提到刚刚那个页面、上一张截图、红点还在不在、页面刚才是什么样时可主动使用，避免反复请求新截图。", {}, async () => {
     const info = await latestInfo(); const img = await fetchLatestImage();
-    return { content: [
+    return contentResult([
       { type: "text", text: `最近截图：${info.filename || "latest"}，时间戳 ${info.mtime || "unknown"}。` },
       { type: "image", data: img.data, mimeType: img.mimeType }
-    ] };
+    ], false, { ok: true, filename: info.filename || "latest", mtime: info.mtime || "", size: info.size || img.bytes, content_type: img.mimeType, source: "latest_screen" });
   });
 
   server.tool("linjian_status", "检查掌心窗后端是否在线，以及 MCP 是否配置了 LINJIAN_URL 和 LINJIAN_TOKEN。当用户在聊天里提到掌心窗报错、出错、有点问题、连接不上、没反应、配置异常、Render/MCP/Token/URL 相关问题时，陪伴对象应主动调用。", {}, async () => {
@@ -1479,7 +1513,7 @@ function makeServer() {
 
 
 
-  // v0.3.8.1：小金库/外卖工具已由 registerWalletTakeoutTools 提前注册，避免 schema 被客户端截断。
+  // v0.3.9.1：小金库/外卖工具已由 registerWalletTakeoutTools 提前注册，避免 schema 被客户端截断。
 
   server.tool("get_guardian_calendar", "读取掌心窗『守护日历』：最近纪念日/节日/倒数日、提前三天横幅提醒、分组与生活状态层 calendar_state。当用户提到七夕、生日、绑定日、纪念日、日历、倒数日或重要日期时可调用。", { device_id: z.string().default(DEFAULT_DEVICE) }, async ({ device_id = DEFAULT_DEVICE }) => {
     const res = await linjianFetch(`/api/life_state?device_id=${encodeURIComponent(device_id)}`);
@@ -1653,13 +1687,19 @@ function makeServer() {
     return textResult({ ok: result.command?.status === "completed", action_done: "日记本封面已更新", book_id, ...result });
   });
 
-  server.tool("write_diary_entry", "以 TA/AI 的视角把一篇日记写入手机本机。成功结果清楚返回标题、日期、book_id 和 entry_id。", {
-    book_id: z.string().min(1).max(100), title: z.string().min(1).max(100), content: z.string().min(1).max(12000), mood: z.string().max(40).default(""),
+  server.tool("write_diary_entry", "以 TA/AI 的视角把一篇日记写入手机本机。book_id 可留空；旧 book_id 对不上时，手机端会用 book_name 或唯一日记本兜底，没有日记本时自动创建默认日记本，多本且无法判断时返回 choices。", {
+    book_id: z.string().max(100).default(""),
+    book_name: z.string().max(60).default(""),
+    book_title: z.string().max(60).default(""),
+    title: z.string().min(1).max(100), content: z.string().min(1).max(12000), mood: z.string().max(40).default(""),
     tags: z.array(z.string().max(30)).max(20).default([]), date: z.string().default(""), time_label: z.string().max(30).default(""), ...diaryWaitFields
-  }, async ({ book_id, title, content, mood = "", tags = [], date = "", time_label = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
-    const result = await runDiaryCommand("write_diary_entry", { book_id, title, content, mood, tags, date, time_label }, device_id, wait_seconds);
+  }, async ({ book_id = "", book_name = "", book_title = "", title, content, mood = "", tags = [], date = "", time_label = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const preferredBookName = book_name || book_title || "";
+    const result = await runDiaryCommand("write_diary_entry", { book_id, book_name: preferredBookName, book_title, title, content, mood, tags, date, time_label }, device_id, wait_seconds);
     await postCompanionAction("write_diary_entry", { summary: `写下日记「${title}」` });
-    return textResult({ ok: result.command?.status === "completed", action_done: `日记「${title}」已写入本机`, book_id, title, date, ...result });
+    const resolvedBookId = result.phone_result?.book_id || book_id || "";
+    const ok = result.phone_result && typeof result.phone_result === "object" && Object.prototype.hasOwnProperty.call(result.phone_result, "ok") ? Boolean(result.phone_result.ok) : result.command?.status === "completed";
+    return textResult({ ok, action_done: ok ? `日记「${title}」已写入本机` : `日记「${title}」未写入，请根据返回原因处理`, book_id: resolvedBookId, input_book_id: book_id, book_name: result.phone_result?.book_name || preferredBookName, title, date, ...result });
   });
 
   server.tool("list_diary_entries", "按 book_id 列出本机日记，结果包含日期、标题、心情、标签及 entry_id。", {
@@ -1669,6 +1709,57 @@ function makeServer() {
   server.tool("read_diary_entry", "按 entry_id 读取一篇本机日记的完整正文。", {
     entry_id: z.string().min(1).max(100), ...diaryWaitFields
   }, async ({ entry_id, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => textResult({ action_done: "已读取日记", entry_id, ...(await runDiaryCommand("read_diary_entry", { entry_id }, device_id, wait_seconds)) }));
+
+  server.tool("read_diary_entry_with_annotations", "按 entry_id 读取一篇本机日记的完整正文，并一起带出用户留在段落旁的页边纸条/批注。适合机回应用户批注前先读取。", {
+    entry_id: z.string().min(1).max(100),
+    mark_seen: z.boolean().default(false).describe("读取后是否把这些纸条标记为已看"),
+    ...diaryWaitFields
+  }, async ({ entry_id, mark_seen = false, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("read_diary_entry_with_annotations", { entry_id, mark_seen }, device_id, wait_seconds);
+    return textResult({ action_done: "已读取日记和页边纸条", entry_id, mark_seen, ...result });
+  });
+
+  server.tool("add_diary_annotation", "给某篇本机日记的一段文字添加“页边纸条”批注。通常由手机前端长按段落创建；AI 也可在用户明确要求代写纸条时使用。", {
+    entry_id: z.string().min(1).max(100),
+    paragraph_index: z.number().int().min(0).default(0),
+    quote_text: z.string().max(800).default(""),
+    annotation_text: z.string().min(1).max(1000),
+    mood: z.string().max(30).default("想回应"),
+    style: z.string().max(40).default("margin_note"),
+    ...diaryWaitFields
+  }, async ({ entry_id, paragraph_index = 0, quote_text = "", annotation_text, mood = "想回应", style = "margin_note", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("add_diary_annotation", { entry_id, paragraph_index, quote_text, annotation_text, mood, style, created_by: "user" }, device_id, wait_seconds);
+    return textResult({ action_done: "页边纸条已保存", entry_id, paragraph_index, mood, ...result });
+  });
+
+  server.tool("list_diary_annotations", "读取用户在本机日记里留下的页边纸条/批注。可按 book_id、entry_id 或 unread_only 筛选，适合机查看用户新批注。", {
+    book_id: z.string().max(100).default(""),
+    entry_id: z.string().max(100).default(""),
+    unread_only: z.boolean().default(false),
+    ...diaryWaitFields
+  }, async ({ book_id = "", entry_id = "", unread_only = false, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("list_diary_annotations", { book_id, entry_id, unread_only }, device_id, wait_seconds);
+    return textResult({ action_done: "已读取页边纸条", book_id, entry_id, unread_only, ...result });
+  });
+
+  server.tool("mark_diary_annotations_seen", "把某张纸条或某篇日记下的纸条标记为已看。AI 读完未读批注并回应后使用。", {
+    annotation_id: z.string().max(100).default(""),
+    entry_id: z.string().max(100).default(""),
+    ...diaryWaitFields
+  }, async ({ annotation_id = "", entry_id = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("mark_diary_annotations_seen", { annotation_id, entry_id }, device_id, wait_seconds);
+    return textResult({ action_done: "页边纸条已标记为已看", annotation_id, entry_id, ...result });
+  });
+
+  server.tool("delete_diary_annotation", "删除一张本机日记页边纸条。必须由用户确认 confirm=true。", {
+    annotation_id: z.string().min(1).max(100),
+    confirm: z.boolean().describe("用户确认后必须明确为 true"),
+    ...diaryWaitFields
+  }, async ({ annotation_id, confirm, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    if (confirm !== true) return textResult({ ok: false, error: "confirmation_required", message: "删除页边纸条前必须把 confirm 设为 true。", annotation_id });
+    const result = await runDiaryCommand("delete_diary_annotation", { annotation_id, confirm: true }, device_id, wait_seconds);
+    return textResult({ action_done: "页边纸条已删除", annotation_id, ...result });
+  });
 
   server.tool("search_diary_entries", "在一本本机日记中按标题、正文、标签、心情关键词和日期范围搜索。", {
     book_id: z.string().min(1).max(100), keyword: z.string().max(200).default(""), date_from: z.string().max(10).default(""), date_to: z.string().max(10).default(""),
@@ -1969,7 +2060,7 @@ function makeServer() {
     return { content: [{ type: "text", text: JSON.stringify(res, null, 2) }] };
   });
 
-  server.tool("send_phone_command", "发送手机控制命令。除常规手机动作外，兼容旧版工具缓存：add_calendar_note 用 title=日期、text=内容；list_calendar_notes 用 title=日期；react_calendar_note 用 target_text=便签ID、message=false 可取消喜欢；get_companion_emotion 读取五维情绪；update_companion_emotion 用 x/y/x1/y1/x2 依次写入想念、嘴硬、心情、焦躁、忙碌。", {
+  server.tool("send_phone_command", "发送手机控制命令。action 支持 open_app/home/back/recents/screen_off/turn_screen_off/lock_screen/tap/swipe/noop/set_alarm/send_notification/run_sequence/save_known_app/get_screen_nodes/tap_text/input_text、屏幕休息、全机专注模式及归电动作。兼容旧版工具缓存：add_calendar_note 用 title=日期、text=内容；list_calendar_notes 用 title=日期；react_calendar_note 用 target_text=便签ID、message=false 可取消喜欢；get_companion_emotion 读取五维情绪；update_companion_emotion 用 x/y/x1/y1/x2 依次写入想念、嘴硬、心情、焦躁、忙碌。set_alarm 支持 hour+minute，或 minutes=几分钟后。", {
     action: z.string(), app: z.string().default(""), package: z.string().default(""), device_id: z.string().default(DEFAULT_DEVICE),
     x: z.number().default(0), y: z.number().default(0), x1: z.number().default(0), y1: z.number().default(0), x2: z.number().default(0), y2: z.number().default(0), duration: z.number().int().default(350),
     target_text: z.string().default(""), text: z.string().default(""), title: z.string().default(""), message: z.string().default(""),
@@ -2367,7 +2458,7 @@ app.get("/", (_req, res) => res.type("text/plain").send("掌心窗 unified MCP i
 app.get("/health", (_req, res) => res.json({
   ok: true,
   service: "linjian-public-mcp",
-  version: "0.3.8.3",
+  version: "0.3.9.1",
   has_url: Boolean(LINJIAN_URL_CANDIDATES.length),
   has_token: Boolean(LINJIAN_TOKEN),
   configured_linjian_url: RAW_LINJIAN_URL || "",
@@ -2376,7 +2467,10 @@ app.get("/health", (_req, res) => res.json({
   guardian_day_tools: true,
   diary_tools: true,
   diary_rename_fix: true,
+  diary_write_fallback: true,
   diary_storage: "phone_local",
+  diary_annotation_tools: true,
+  diary_annotation_ui: "margin_notes",
   focus_tools: true,
   focus_tool_names: ["get_focus_status", "start_focus_mode", "end_focus_mode", "set_focus_plan", "reply_focus_request", "approve_focus_unlock", "deny_focus_unlock"],
   mcp_wallet_endpoint: "/mcp-wallet",
@@ -2386,16 +2480,56 @@ app.get("/health", (_req, res) => res.json({
   priority_tool: "wallet_takeout_action",
   wallet_takeout_tool_count: WALLET_TAKEOUT_ACTIONS.size,
   wallet_takeout_tools: Array.from(WALLET_TAKEOUT_ACTIONS),
-  stability_note: "v0.3.8.3 新增随机归电时机、五轴情绪惯性与共同日历便签。"
+  stability_note: "v0.3.9.1 合并上游 0.3.9.0：保留随机归电、五轴情绪惯性、共同日历便签、主动消息与私密日记，并加入日记批注、专注模式、钱包、外卖及 MCP 初始化兼容修复。"
 }));
+
+// Some third-party MCP clients send non-standard experimental capability flags during
+// initialize (for example params.capabilities.experimental.ovoActivityCards).  Older
+// SDK schema validation can reject the whole initialize request before our tools are
+// available.  The public MCP server does not use those flags, so we strip only the
+// known-incompatible experimental flag and keep all standard capabilities intact.
+function sanitizeMcpInitializeMessage(message) {
+  if (!message || typeof message !== "object") return message;
+  if (message.method !== "initialize") return message;
+  const experimental = message.params?.capabilities?.experimental;
+  if (experimental && typeof experimental === "object" && Object.prototype.hasOwnProperty.call(experimental, "ovoActivityCards")) {
+    delete experimental.ovoActivityCards;
+    if (Object.keys(experimental).length === 0) delete message.params.capabilities.experimental;
+  }
+  return message;
+}
+
+function sanitizeMcpRequestBody(body) {
+  if (Array.isArray(body)) return body.map((item) => sanitizeMcpInitializeMessage(item));
+  return sanitizeMcpInitializeMessage(body);
+}
+
 app.post("/mcp", async (req, res) => {
-  try { const server = makeServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }
-  catch (err) { console.error(err); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null }); }
+  try {
+    const server = makeServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const body = sanitizeMcpRequestBody(req.body);
+    res.on("close", () => transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null });
+  }
 });
 app.get("/mcp", (_req, res) => res.status(405).json({ ok: false, error: "Use POST /mcp for Streamable HTTP MCP." }));
 app.post("/mcp-wallet", async (req, res) => {
-  try { const server = makeWalletTakeoutServer(); const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined }); res.on("close", () => transport.close()); await server.connect(transport); await transport.handleRequest(req, res, req.body); }
-  catch (err) { console.error(err); if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null }); }
+  try {
+    const server = makeWalletTakeoutServer();
+    const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+    const body = sanitizeMcpRequestBody(req.body);
+    res.on("close", () => transport.close());
+    await server.connect(transport);
+    await transport.handleRequest(req, res, body);
+  } catch (err) {
+    console.error(err);
+    if (!res.headersSent) res.status(500).json({ jsonrpc: "2.0", error: { code: -32603, message: String(err?.message || err) }, id: null });
+  }
 });
 app.get("/mcp-wallet", (_req, res) => res.status(405).json({ ok: false, error: "Use POST /mcp-wallet for wallet/takeout Streamable HTTP MCP.", endpoint: "/mcp-wallet" }));
 const sseTransports = new Map();

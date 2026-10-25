@@ -3,8 +3,11 @@ package dev.linjian.peek;
 import android.app.Notification;
 import android.content.ComponentName;
 import android.content.Context;
+import android.media.MediaDescription;
+import android.media.MediaMetadata;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
+import android.media.session.MediaSessionManager;
 import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.Bundle;
@@ -16,6 +19,7 @@ import org.json.JSONObject;
 
 import java.text.SimpleDateFormat;
 import java.util.Date;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -29,10 +33,15 @@ public class MediaState {
         JSONObject out = new JSONObject();
         try {
             boolean granted = hasNotificationListenerAccess(ctx);
-            Snapshot s = latest == null ? Snapshot.empty("等待媒体通知") : latest;
+            Snapshot live = null;
+            if (granted) {
+                live = queryActiveSessions(ctx);
+                if (live != null && live.hasMedia()) latest = live;
+            }
+            Snapshot s = (live != null && live.hasMedia()) ? live : (latest == null ? Snapshot.empty("等待媒体通知") : latest);
             out.put("available", granted && s.hasMedia());
             out.put("permission_granted", granted);
-            out.put("source", "notification_listener");
+            out.put("source", "media_session_or_notification_listener");
             out.put("package", s.pkg);
             out.put("app", s.app);
             out.put("title", s.title);
@@ -55,16 +64,22 @@ public class MediaState {
 
     public static String pretty(Context ctx) {
         if (!hasNotificationListenerAccess(ctx)) return "媒体：未开启通知使用权";
-        Snapshot s = latest == null ? Snapshot.empty("等待媒体通知") : latest;
+        Snapshot s = currentSnapshot(ctx);
         if (!s.hasMedia()) return "媒体：暂无播放";
         return "媒体：" + displayLine(s);
     }
 
     public static String summary(Context ctx) {
         if (!hasNotificationListenerAccess(ctx)) return "媒体状态未授权";
-        Snapshot s = latest == null ? Snapshot.empty("等待媒体通知") : latest;
+        Snapshot s = currentSnapshot(ctx);
         if (!s.hasMedia()) return "暂无媒体播放";
         return displayLine(s);
+    }
+
+    private static Snapshot currentSnapshot(Context ctx) {
+        Snapshot live = queryActiveSessions(ctx);
+        if (live != null && live.hasMedia()) latest = live;
+        return (live != null && live.hasMedia()) ? live : (latest == null ? Snapshot.empty("等待媒体通知") : latest);
     }
 
     public static boolean hasNotificationListenerAccess(Context ctx) {
@@ -119,6 +134,7 @@ public class MediaState {
                     if (best == null || score(s) > score(best)) best = s;
                 }
             }
+            if (best == null) best = queryActiveSessions(ctx);
             latest = best == null ? Snapshot.empty("暂无媒体播放") : best;
         } catch (Exception e) {
             latest = Snapshot.empty("媒体读取失败：" + ScreenshotService.shortMsg(e));
@@ -148,13 +164,27 @@ public class MediaState {
         if (token != null) {
             try {
                 MediaController controller = new MediaController(ctx, token);
-                if (controller.getMetadata() != null) {
-                    String metaTitle = controller.getMetadata().getString(android.media.MediaMetadata.METADATA_KEY_TITLE);
-                    String metaArtist = controller.getMetadata().getString(android.media.MediaMetadata.METADATA_KEY_ARTIST);
-                    String metaAlbum = controller.getMetadata().getString(android.media.MediaMetadata.METADATA_KEY_ALBUM);
+                MediaMetadata md = controller.getMetadata();
+                if (md != null) {
+                    String metaTitle = firstNonEmpty(
+                            metaText(md, MediaMetadata.METADATA_KEY_DISPLAY_TITLE),
+                            metaText(md, MediaMetadata.METADATA_KEY_TITLE));
+                    String metaArtist = firstNonEmpty(
+                            metaText(md, MediaMetadata.METADATA_KEY_ARTIST),
+                            metaText(md, MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
+                            metaText(md, MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE));
+                    String metaAlbum = metaText(md, MediaMetadata.METADATA_KEY_ALBUM);
                     if (!empty(metaTitle)) title = metaTitle;
                     if (!empty(metaArtist)) artist = metaArtist;
                     if (!empty(metaAlbum)) album = metaAlbum;
+                    try {
+                        MediaDescription desc = md.getDescription();
+                        if (desc != null) {
+                            if (empty(title)) title = safeText(desc.getTitle());
+                            if (empty(artist)) artist = safeText(desc.getSubtitle());
+                            if (empty(album)) album = safeText(desc.getDescription());
+                        }
+                    } catch (Exception ignored) { }
                 }
                 PlaybackState ps = controller.getPlaybackState();
                 if (ps != null) state = playbackState(ps.getState());
@@ -173,11 +203,80 @@ public class MediaState {
         return s;
     }
 
+    /**
+     * 主动读取系统 MediaSession。
+     * 某些播放器通知不会稳定带 CATEGORY_TRANSPORT / android.mediaSession，或者授权时通知已经存在，
+     * 只等 NotificationListener 回调会漏掉正在播放的内容。这里在每次 collect 时主动拉一次活跃会话。
+     */
+    private static Snapshot queryActiveSessions(Context ctx) {
+        if (ctx == null) return null;
+        try {
+            MediaSessionManager msm = (MediaSessionManager) ctx.getSystemService(Context.MEDIA_SESSION_SERVICE);
+            if (msm == null) return null;
+            ComponentName listener = new ComponentName(ctx, MediaNotificationService.class);
+            List<MediaController> controllers = msm.getActiveSessions(listener);
+            Snapshot best = null;
+            if (controllers != null) {
+                for (MediaController controller : controllers) {
+                    Snapshot s = fromController(ctx, controller);
+                    if (s == null || !s.hasMedia()) continue;
+                    if (best == null || score(s) > score(best)) best = s;
+                }
+            }
+            return best;
+        } catch (SecurityException ignored) {
+            return null;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
+    private static Snapshot fromController(Context ctx, MediaController controller) {
+        if (ctx == null || controller == null) return null;
+        Snapshot s = new Snapshot();
+        try {
+            s.pkg = controller.getPackageName() == null ? "" : controller.getPackageName();
+            s.app = LifeState.appLabelPublic(ctx, s.pkg);
+            MediaMetadata md = controller.getMetadata();
+            if (md != null) {
+                s.title = firstNonEmpty(
+                        metaText(md, MediaMetadata.METADATA_KEY_DISPLAY_TITLE),
+                        metaText(md, MediaMetadata.METADATA_KEY_TITLE));
+                s.artist = firstNonEmpty(
+                        metaText(md, MediaMetadata.METADATA_KEY_ARTIST),
+                        metaText(md, MediaMetadata.METADATA_KEY_ALBUM_ARTIST),
+                        metaText(md, MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE));
+                s.album = metaText(md, MediaMetadata.METADATA_KEY_ALBUM);
+                try {
+                    MediaDescription desc = md.getDescription();
+                    if (desc != null) {
+                        if (empty(s.title)) s.title = safeText(desc.getTitle());
+                        if (empty(s.artist)) s.artist = safeText(desc.getSubtitle());
+                        if (empty(s.album)) s.album = safeText(desc.getDescription());
+                    }
+                } catch (Exception ignored) { }
+            }
+            PlaybackState ps = controller.getPlaybackState();
+            if (ps != null) s.state = playbackState(ps.getState());
+            else s.state = "unknown";
+            s.updatedAtMs = System.currentTimeMillis();
+            s.reason = "";
+            if (empty(s.title) && empty(s.artist) && empty(s.album)) return null;
+            return s;
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     private static int score(Snapshot s) {
         int score = 0;
         if ("playing".equals(s.state)) score += 100;
+        else if ("buffering".equals(s.state) || "connecting".equals(s.state)) score += 80;
+        else if ("paused".equals(s.state)) score += 60;
+        else if ("stopped".equals(s.state)) score -= 20;
         if (!empty(s.title)) score += 20;
         if (!empty(s.artist)) score += 10;
+        if (!empty(s.album)) score += 3;
         if (!empty(s.pkg)) score += 1;
         return score;
     }
@@ -221,6 +320,19 @@ public class MediaState {
         return sb.toString();
     }
 
+    private static String firstNonEmpty(String... values) {
+        if (values == null) return "";
+        for (String v : values) {
+            if (!empty(v)) return v.trim();
+        }
+        return "";
+    }
+
+    private static String metaText(MediaMetadata md, String key) {
+        if (md == null || key == null) return "";
+        try { return safeText(md.getText(key)); } catch (Exception ignored) { return ""; }
+    }
+
     private static String safeText(CharSequence cs) { return cs == null ? "" : cs.toString().trim(); }
     private static boolean empty(String s) { return s == null || s.trim().length() == 0; }
     private static String formatLocal(long ms) { return new SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.CHINA).format(new Date(ms)); }
@@ -234,7 +346,7 @@ public class MediaState {
         String state = "unknown";
         long updatedAtMs = 0L;
         String reason = "";
-        boolean hasMedia() { return !MediaState.empty(title) || !MediaState.empty(artist); }
+        boolean hasMedia() { return !MediaState.empty(title) || !MediaState.empty(artist) || !MediaState.empty(album); }
         static Snapshot empty(String reason) { Snapshot s = new Snapshot(); s.reason = reason == null ? "" : reason; return s; }
     }
 }

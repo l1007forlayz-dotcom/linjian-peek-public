@@ -20,7 +20,7 @@ import java.nio.charset.StandardCharsets;
 
 /** 守护日历：纪念日、节日、倒数日、提前三天横幅提醒，并接入生活状态层。 */
 public class CalendarState {
-    public static final String VERSION = "0.3.8.3";
+    public static final String VERSION = "0.3.9.1";
     public static final String KEY_EVENTS = "guard_calendar_events_json";
     public static final String KEY_SHARED_NOTES = "guard_calendar_shared_notes_json";
     public static final String THEME_COLOR = "#B8A8D8";
