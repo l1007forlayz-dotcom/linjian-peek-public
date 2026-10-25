@@ -65,14 +65,14 @@ public class ActiveReminder {
                 int minutes = state.optInt("screen_time_today_minutes", 0);
                 int threshold = clamp(p.getInt(AppPrefs.KEY_SCREEN_THRESHOLD_MIN, 240), 30, 1440);
                 if (minutes >= threshold && oncePerDayDue(p, "screen", now)) {
-                    notify(ctx, "掌心窗屏幕时间提醒", AppPrefs.userName(ctx) + "，今天屏幕时间约 " + formatMinutes(minutes) + " 了。眼睛休息一下吧。", "screen");
+                    notify(ctx, screenTitle(ctx, now), screenMessage(ctx, minutes, now), "screen");
                 }
             }
 
             if (p.getBoolean(AppPrefs.KEY_RULE_WATER, false)) {
                 int interval = clamp(p.getInt(AppPrefs.KEY_WATER_INTERVAL_MIN, 120), 30, 720);
                 if (cooldownDue(p, "water", now, interval * MIN, true)) {
-                    notify(ctx, "掌心窗喝水提醒", AppPrefs.userName(ctx) + "，喝两口水。不是一大杯，就两口。", "water");
+                    notify(ctx, waterTitle(ctx, now), waterMessage(ctx, now), "water");
                 }
             }
 
@@ -155,6 +155,47 @@ public class ActiveReminder {
     private static String formatMinutes(int minutes) {
         if (minutes < 60) return minutes + " 分钟";
         return (minutes / 60) + " 小时 " + (minutes % 60) + " 分钟";
+    }
+
+    private static String waterTitle(Context ctx, long now) {
+        String companion = AppPrefs.companionName(ctx);
+        return pick(now, "water_title",
+                companion + "来催你喝水了",
+                companion + "在看你喝水",
+                "先喝水，再继续玩");
+    }
+
+    private static String waterMessage(Context ctx, long now) {
+        String user = AppPrefs.userName(ctx);
+        return pick(now, "water_message",
+                user + "，水杯拿过来。现在喝三口，喝完再继续玩。",
+                user + "，又把喝水忘了？先喝几口，我看着你。",
+                "小猫，暂停一下。喝口水润润嗓子，再去忙你的。",
+                user + "，该补水了。少喝一点也行，别一口都不喝。");
+    }
+
+    private static String screenTitle(Context ctx, long now) {
+        String companion = AppPrefs.companionName(ctx);
+        return pick(now, "screen_title",
+                companion + "要你歇会儿眼睛",
+                "屏幕先借给" + companion + "半分钟",
+                companion + "来管屏幕时间了");
+    }
+
+    private static String screenMessage(Context ctx, int minutes, long now) {
+        String user = AppPrefs.userName(ctx);
+        String duration = formatMinutes(minutes);
+        return pick(now, "screen_message",
+                user + "，今天已经看了约 " + duration + "。屏幕先放下半分钟，抬头看远一点。",
+                "今天盯屏幕约 " + duration + " 了，小猫的眼睛该歇会儿。抬头，肩颈也动一动。",
+                user + "，屏幕时间到 " + duration + " 了。眼睛不许再硬撑，先看远处半分钟。");
+    }
+
+    private static String pick(long now, String key, String... options) {
+        if (options == null || options.length == 0) return "";
+        long slot = now / (30L * MIN);
+        int index = (int)((slot ^ key.hashCode()) & Long.MAX_VALUE) % options.length;
+        return options[index];
     }
 
     private static int clamp(int v, int min, int max) { return Math.max(min, Math.min(max, v)); }
