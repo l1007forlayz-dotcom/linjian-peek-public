@@ -109,7 +109,7 @@ public class ScreenshotService extends AccessibilityService {
             DebugState.append(this, "无障碍读取增强配置失败：" + shortMsg(e));
         }
         NowState.start(this);
-        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏/专注模式可用 v0.3.9.1");
+        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏/专注模式可用 v" + AppPrefs.APP_VERSION_NAME);
         watchdog = new Handler(Looper.getMainLooper());
         watchdog.postDelayed(watchdogTick, 15000);
         startBackgroundPolling();
@@ -167,7 +167,7 @@ public class ScreenshotService extends AccessibilityService {
         backgroundPollThread = new HandlerThread("LinjianAccessibilityPoll");
         backgroundPollThread.start();
         backgroundPollHandler = new Handler(backgroundPollThread.getLooper());
-        DebugState.append(this, "无障碍兜底轮询已启动 v0.3.9.1（前台服务运行时不重复轮询）");
+        DebugState.append(this, "无障碍兜底轮询已启动 v" + AppPrefs.APP_VERSION_NAME + "（前台服务运行时不重复轮询）");
         backgroundPollHandler.postDelayed(backgroundPollTick, 6000);
     }
 
