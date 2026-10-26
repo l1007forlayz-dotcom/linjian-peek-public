@@ -1,16 +1,28 @@
 {
-  "latest_version_name": "0.3.7.3",
-  "latest_version_code": 30703,
-  "apk_url": "https://github.com/linzhi-524/linjian-peek-public/releases/download/v0.3.7.3/Zhangxinchuang-public-v0.3.7.3.apk",
+  "latest_version_name": "0.3.9.0",
+  "latest_version_code": 30900,
+  "apk_url": "https://github.com/linzhi-524/linjian-peek-public/releases/download/v0.3.9.0/Zhangxinchuang-public-v0.3.9.0.apk",
   "sha256": "",
   "required": false,
+  "notes": [
+    "修复部分 AI 平台连接 MCP 时因 experimental.ovoActivityCards 触发 Invalid input 的兼容问题。",
+    "修复日记批注读取工具返回 noop：server 白名单补齐 read/list/add/mark/delete annotation 相关 action。",
+    "保留上一版媒体状态修复：MediaSession 主动读取媒体播放状态，通知监听作为兜底。",
+    "版本号升级到 v0.3.9.0 / 30900，固定签名保持不变。",
+    "部署提示：MCP 服务与 server 服务都需要重新部署；手机 App 如需显示新版本号需重新打包安装。"
+  ],
   "changelog": [
-    "今日页「此刻状态」卡片新增媒体状态，开启通知使用权后可显示正在播放的歌曲/音频、歌手、播放状态和来源 App。",
-    "修复归电来电页接通后没有打开归电设置指定包名的问题。",
-    "修复陪伴页「xx 的行动」不显示 AI/MCP 工具调用记录的问题。",
-    "MCP 行动同步写入统一行动日志，手机端合并本地与远端行动记录。",
-    "Railway 文档改为手动双服务部署，移除一键模板引导，避免把 server 域名误填为 MCP 地址。",
-    "server 收到 /mcp 或 /sse 时会返回更明确的 wrong service 提示。",
-    "固定签名保持不变，支持覆盖安装旧版本。"
+    "修复部分 AI 平台连接 MCP 时因 experimental.ovoActivityCards 触发 Invalid input 的兼容问题。",
+    "修复日记批注读取工具返回 noop：server 白名单补齐 read/list/add/mark/delete annotation 相关 action。",
+    "保留上一版媒体状态修复：MediaSession 主动读取媒体播放状态，通知监听作为兜底。",
+    "版本号升级到 v0.3.9.0 / 30900，固定签名保持不变。",
+    "部署提示：MCP 服务与 server 服务都需要重新部署；手机 App 如需显示新版本号需重新打包安装。"
+  ],
+  "release_notes": [
+    "修复部分 AI 平台连接 MCP 时因 experimental.ovoActivityCards 触发 Invalid input 的兼容问题。",
+    "修复日记批注读取工具返回 noop：server 白名单补齐 read/list/add/mark/delete annotation 相关 action。",
+    "保留上一版媒体状态修复：MediaSession 主动读取媒体播放状态，通知监听作为兜底。",
+    "版本号升级到 v0.3.9.0 / 30900，固定签名保持不变。",
+    "部署提示：MCP 服务与 server 服务都需要重新部署；手机 App 如需显示新版本号需重新打包安装。"
   ]
 }

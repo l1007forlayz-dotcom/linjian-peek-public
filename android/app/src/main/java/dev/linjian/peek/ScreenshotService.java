@@ -109,7 +109,7 @@ public class ScreenshotService extends AccessibilityService {
             DebugState.append(this, "无障碍读取增强配置失败：" + shortMsg(e));
         }
         NowState.start(this);
-        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏可用 v0.3.8.10");
+        DebugState.append(this, "无障碍服务已连接：截图/读屏/节点坐标/活动轨迹/远程息屏/专注模式可用 v" + AppPrefs.APP_VERSION_NAME);
         watchdog = new Handler(Looper.getMainLooper());
         watchdog.postDelayed(watchdogTick, 15000);
         startBackgroundPolling();
@@ -119,7 +119,6 @@ public class ScreenshotService extends AccessibilityService {
         if (event == null) return;
         CharSequence pkg = event.getPackageName();
         int t = event.getEventType();
-
         // 不再让状态栏/通知栏的内容变化把真正前台 App 覆盖成 com.android.systemui。
         // App 切换时先记事件包名，随后 updateScreenText() 会用真实应用窗口再次校正。
         if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && pkg != null) {
@@ -127,15 +126,16 @@ public class ScreenshotService extends AccessibilityService {
             if (!"com.android.systemui".equals(p) || isKeyguardLockedNow()) currentPackage = p;
         }
 
-        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || t == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
+        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOWS_CHANGED || t == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED || t == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
             updateScreenText();
         }
 
-        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+        if (t == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED || t == AccessibilityEvent.TYPE_WINDOWS_CHANGED) {
             String actual = currentPackage();
             if (actual != null && !actual.isEmpty()) {
                 ActivityEventStore.recordForegroundChange(this, actual);
                 AppGate.onForegroundPackage(this, actual);
+                FocusMode.onForegroundPackage(this, actual);
             }
         }
     }
@@ -167,7 +167,7 @@ public class ScreenshotService extends AccessibilityService {
         backgroundPollThread = new HandlerThread("LinjianAccessibilityPoll");
         backgroundPollThread.start();
         backgroundPollHandler = new Handler(backgroundPollThread.getLooper());
-        DebugState.append(this, "无障碍兜底轮询已启动 v0.3.8.3（前台服务运行时不重复轮询）");
+        DebugState.append(this, "无障碍兜底轮询已启动 v" + AppPrefs.APP_VERSION_NAME + "（前台服务运行时不重复轮询）");
         backgroundPollHandler.postDelayed(backgroundPollTick, 6000);
     }
 

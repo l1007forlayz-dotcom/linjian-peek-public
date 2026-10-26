@@ -12,6 +12,7 @@ public class MediaNotificationService extends NotificationListenerService {
 
     @Override public void onNotificationPosted(StatusBarNotification sbn) {
         super.onNotificationPosted(sbn);
+        try { WalletState.captureNotification(this, sbn); } catch (Exception ignored) { }
         refreshMediaState(null);
     }
 

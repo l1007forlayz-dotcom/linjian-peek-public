@@ -11,17 +11,20 @@ import java.util.Map;
 
 public class AppPrefs {
     public static final String PREFS = "linjian_peek";
-    public static final String APP_VERSION_NAME = "0.3.8.10";
-    public static final int APP_VERSION_CODE = 30810;
+    public static final String APP_VERSION_NAME = "0.3.9.2";
+    public static final int APP_VERSION_CODE = 30902;
     public static final String KEY_SERVER = "server_url";
     public static final String KEY_TOKEN = "token";
     public static final String KEY_DEVICE = "device_id";
     public static final String KEY_INTERVAL = "poll_interval_ms";
-    public static final int DEFAULT_POLL_INTERVAL_MS = 3000;
-    public static final int MIN_POLL_INTERVAL_MS = 2500;
-    public static final int MAX_POLL_INTERVAL_MS = 15000;
-    public static final int STATE_UPLOAD_INTERVAL_MS = 10000;
-    public static final int ACCESSIBILITY_FALLBACK_INTERVAL_MS = 12000;
+    // Render free services have a deliberately low inbound request ceiling.
+    // Older builds polled every 3 seconds and uploaded state every 10 seconds,
+    // which could keep the shared backend inside a rolling HTTP 429 window.
+    public static final int DEFAULT_POLL_INTERVAL_MS = 10000;
+    public static final int MIN_POLL_INTERVAL_MS = 8000;
+    public static final int MAX_POLL_INTERVAL_MS = 60000;
+    public static final int STATE_UPLOAD_INTERVAL_MS = 60000;
+    public static final int ACCESSIBILITY_FALLBACK_INTERVAL_MS = 30000;
     public static final String KEY_CITY = "life_city";
     public static final String KEY_WEATHER_NOTE = "life_weather_note";
     public static final String KEY_WEATHER_LOCATIONS = "weather_locations_lines";
@@ -65,6 +68,7 @@ public class AppPrefs {
     public static final String KEY_HOME_COOLDOWN_MIN = "home_mode_cooldown_min";
     public static final String KEY_HOME_TARGET_PACKAGE = "home_mode_target_package";
     public static final String DEFAULT_HOME_TARGET_PACKAGE = "";
+    public static final String DEFAULT_HOME_WATCH_PACKAGES = "com.ss.android.ugc.aweme,com.xingin.xhs";
 
     public static SharedPreferences get(Context ctx) { return ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE); }
 
@@ -80,13 +84,24 @@ public class AppPrefs {
     }
 
     public static boolean migrateLegacyConfig(Context ctx) { return false; }
+    public static String cleanUrl(String raw) { return cleanServer(raw); }
+    public static String[] candidateServers(Context ctx) {
+        String server = server(ctx);
+        return server.length() == 0 ? new String[0] : new String[]{server};
+    }
     public static String server(Context ctx) { return cleanServer(get(ctx).getString(KEY_SERVER, "")); }
     public static String token(Context ctx) { return get(ctx).getString(KEY_TOKEN, ""); }
     public static String device(Context ctx) { return get(ctx).getString(KEY_DEVICE, "android-phone"); }
     public static int interval(Context ctx) {
         int saved = get(ctx).getInt(KEY_INTERVAL, DEFAULT_POLL_INTERVAL_MS);
-        if (saved < MIN_POLL_INTERVAL_MS) return DEFAULT_POLL_INTERVAL_MS;
-        if (saved > MAX_POLL_INTERVAL_MS) return MAX_POLL_INTERVAL_MS;
+        if (saved < MIN_POLL_INTERVAL_MS) {
+            get(ctx).edit().putInt(KEY_INTERVAL, DEFAULT_POLL_INTERVAL_MS).apply();
+            return DEFAULT_POLL_INTERVAL_MS;
+        }
+        if (saved > MAX_POLL_INTERVAL_MS) {
+            get(ctx).edit().putInt(KEY_INTERVAL, MAX_POLL_INTERVAL_MS).apply();
+            return MAX_POLL_INTERVAL_MS;
+        }
         return saved;
     }
 
@@ -170,6 +185,36 @@ public class AppPrefs {
             out.append(app.getKey()).append("|").append(app.getValue()).append("\n");
         }
         return out.toString().trim();
+    }
+
+    public static String homeWatchPackages(Context ctx) {
+        SharedPreferences prefs = get(ctx);
+        String saved = normalizePackageCsv(prefs.getString(KEY_HOME_WATCH_PACKAGES, ""));
+        if (!saved.isEmpty()) return saved;
+        StringBuilder fromTargets = new StringBuilder();
+        for (String pkg : targetApps(ctx).values()) {
+            if (!isPackageLike(pkg)) continue;
+            if (fromTargets.length() > 0) fromTargets.append(',');
+            fromTargets.append(pkg.trim());
+        }
+        String normalized = normalizePackageCsv(fromTargets.toString());
+        return normalized.isEmpty() ? DEFAULT_HOME_WATCH_PACKAGES : normalized;
+    }
+
+    public static String normalizePackageCsv(String raw) {
+        LinkedHashMap<String, String> packages = new LinkedHashMap<>();
+        String source = raw == null ? "" : raw;
+        for (String part : source.split("[,，\n ]+")) {
+            String pkg = part == null ? "" : part.trim();
+            if (!isPackageLike(pkg)) continue;
+            packages.put(pkg, pkg);
+        }
+        StringBuilder out = new StringBuilder();
+        for (String pkg : packages.values()) {
+            if (out.length() > 0) out.append(',');
+            out.append(pkg);
+        }
+        return out.toString();
     }
 
     public static String normalizeTargetApps(String raw) {

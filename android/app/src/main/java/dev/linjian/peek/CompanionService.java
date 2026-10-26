@@ -8,6 +8,7 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.net.Uri;
@@ -21,6 +22,7 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.HttpURLConnection;
@@ -34,13 +36,16 @@ public class CompanionService extends Service {
     private static final String CHANNEL_ID = "linjian_peek_service";
     private static final String REMINDER_CHANNEL_ID = "linjian_peek_heads_up_v3";
     private static final int NOTIFICATION_ID = 20260715;
+    private static final int HOME_MODE_NOTIFICATION_ID = 20260913;
+    private static final String KEY_PENDING_COMMAND_REPORT = "pending_command_report";
     private static volatile boolean running = false;
 
     private String serverUrl;
     private String token;
     private Handler pollHandler;
     private HandlerThread pollThread;
-    private long rateLimitedUntilMs = 0L;
+    private static volatile long rateLimitedUntilMs = 0L;
+    private static volatile int rateLimitStreak = 0;
     private static long lastStateUploadMs = 0L;
 
     public static boolean isRunning() { return running; }
@@ -64,7 +69,7 @@ public class CompanionService extends Service {
             DebugState.append(this, "服务启动失败：服务器地址或 Token 为空");
             stopSelf(); return START_NOT_STICKY;
         }
-        DebugState.append(this, "掌心窗公开版 v0.3.8.8 服务已启动，目标：" + serverUrl);
+        DebugState.append(this, "掌心窗公开版 v" + AppPrefs.APP_VERSION_NAME + " 服务已启动（像素小猫桌宠已保留），目标：" + serverUrl);
         if (!running) { running = true; startPolling(); } else DebugState.append(this, "服务已在运行，继续轮询");
         return START_STICKY;
     }
@@ -82,14 +87,23 @@ public class CompanionService extends Service {
         long now = System.currentTimeMillis();
         long delay = AppPrefs.interval(this);
         try {
-            uploadStateThrottled(serverUrl, token, this, false);
             if (rateLimitedUntilMs > now) {
                 delay = Math.max(delay, rateLimitedUntilMs - now);
             } else {
-                String body = pollServer();
-                if (body != null && body.length() > 0) handleCommandBody(this, body, serverUrl, token);
+                // A locally completed command report is more important than a
+                // fresh poll.  Flush it first so a transient 429 cannot leave a
+                // diary write stuck as "dispatched" forever.
+                boolean reportFlushed = flushPendingReport(this, serverUrl, token);
+                if (reportFlushed) uploadStateThrottled(serverUrl, token, this, false);
+                if (reportFlushed && rateLimitedUntilMs <= System.currentTimeMillis()) {
+                    String body = pollServer();
+                    if (body != null && body.length() > 0) handleCommandBody(this, body, serverUrl, token);
+                }
             }
         } catch (Exception e) { DebugState.append(this, "轮询异常：" + ScreenshotService.shortMsg(e)); }
+        if (rateLimitedUntilMs > System.currentTimeMillis()) {
+            delay = Math.max(delay, rateLimitedUntilMs - System.currentTimeMillis());
+        }
         if (running) pollHandler.postDelayed(this::pollLoop, Math.max(AppPrefs.MIN_POLL_INTERVAL_MS, delay));
     }
 
@@ -99,12 +113,12 @@ public class CompanionService extends Service {
         try {
             int code = conn.getResponseCode(); String body = ScreenshotService.readBody(conn, code);
             if (code == 200) {
+                clearRateLimit();
                 if (body.contains("\"command\": null") || body.contains("\"command\":null")) return "";
                 DebugState.append(this, "轮询成功：收到命令包"); return body;
             } else {
                 if (code == 429) {
-                    long retryMs = parseRetryAfterMs(conn.getHeaderField("Retry-After"));
-                    rateLimitedUntilMs = System.currentTimeMillis() + retryMs;
+                    long retryMs = registerRateLimit(conn.getHeaderField("Retry-After"));
                     DebugState.append(this, "轮询限流：HTTP 429，约 " + Math.max(1, retryMs / 1000) + " 秒后重试");
                 } else DebugState.append(this, "轮询失败：HTTP " + code + " " + ScreenshotService.clip(body));
             }
@@ -114,10 +128,26 @@ public class CompanionService extends Service {
 
     private static long parseRetryAfterMs(String header) {
         try {
-            if (header == null || header.trim().isEmpty()) return 15000L;
+            if (header == null || header.trim().isEmpty()) return 0L;
             long seconds = Long.parseLong(header.trim());
-            return Math.max(5000L, Math.min(60000L, seconds * 1000L));
-        } catch (Exception ignored) { return 15000L; }
+            return Math.max(1000L, Math.min(600000L, seconds * 1000L));
+        } catch (Exception ignored) { return 0L; }
+    }
+
+    private static synchronized long registerRateLimit(String retryAfter) {
+        rateLimitStreak = Math.min(6, rateLimitStreak + 1);
+        long exponential = Math.min(300000L, 30000L * (1L << Math.max(0, rateLimitStreak - 1)));
+        long retryMs = Math.max(parseRetryAfterMs(retryAfter), exponential);
+        // Small jitter keeps a restarted foreground service from lining up with
+        // an MCP retry on the same exact second.
+        retryMs += (long)(Math.random() * 5000L);
+        rateLimitedUntilMs = Math.max(rateLimitedUntilMs, System.currentTimeMillis() + retryMs);
+        return retryMs;
+    }
+
+    private static synchronized void clearRateLimit() {
+        rateLimitStreak = 0;
+        rateLimitedUntilMs = 0L;
     }
 
     public static void handleCommandBody(Context ctx, String body, String serverUrl, String token) {
@@ -198,12 +228,41 @@ public class CompanionService extends Service {
                 try { reportCommand(ctx, serverUrl, token, id, true, result); uploadStateThrottled(serverUrl, token, ctx, false); } catch (Exception ignored) { }
                 return;
             }
+            if (FocusMode.isFocusAction(action)) {
+                Context focusCtx = ScreenshotService.getInstance() != null ? ScreenshotService.getInstance() : ctx;
+                JSONObject rr = FocusMode.handleCommand(focusCtx, cmd);
+                boolean ok = rr.optBoolean("ok", false);
+                String result = rr.optString("result", rr.toString());
+                if (ok && ("start_focus_mode".equals(action) || "enable_focus_mode".equals(action))) {
+                    FocusMode.forceShowLockActivity(focusCtx);
+                }
+                DebugState.append(ctx, "执行专注模式命令 " + action + "：" + result);
+                try { reportCommand(ctx, serverUrl, token, id, ok, result); uploadStateThrottled(serverUrl, token, focusCtx, true); } catch (Exception ignored) { }
+                return;
+            }
             if (isAppGateAction(action)) {
                 JSONObject rr = AppGate.handleCommand(ctx, normalizedGateCommand(cmd));
                 boolean ok = rr.optBoolean("ok", false);
                 String result = rr.optString("result", rr.toString());
                 DebugState.append(ctx, "执行应用门禁命令 " + action + "：" + result);
                 try { reportCommand(ctx, serverUrl, token, id, ok, result); uploadStateThrottled(serverUrl, token, ctx, false); } catch (Exception ignored) { }
+                return;
+            }
+
+            if (isWalletAction(action)) {
+                JSONObject rr = WalletState.handleCommand(ctx, cmd);
+                boolean ok = rr.optBoolean("ok", false);
+                String result = rr.optString("result", rr.toString());
+                DebugState.append(ctx, "执行小金库命令 " + action + "：" + result);
+                try { reportCommand(ctx, serverUrl, token, id, ok, result); notifyWalletUpdated(ctx); uploadStateThrottled(serverUrl, token, ctx, true); } catch (Exception ignored) { }
+                return;
+            }
+            if (isTakeoutAction(action)) {
+                JSONObject rr = TakeoutState.handleCommand(ctx, cmd);
+                boolean ok = rr.optBoolean("ok", false);
+                String result = rr.optString("result", rr.toString());
+                DebugState.append(ctx, "执行外卖小助手命令 " + action + "：" + result);
+                try { reportCommand(ctx, serverUrl, token, id, ok, result); uploadStateThrottled(serverUrl, token, ctx, true); } catch (Exception ignored) { }
                 return;
             }
             if ("run_sequence".equals(action)) {
@@ -239,6 +298,15 @@ public class CompanionService extends Service {
         return "lock_app".equals(action) || "unlock_app".equals(action) || "temporary_unlock_app".equals(action) || "extend_lock".equals(action) || "deny_unlock_request".equals(action) || "get_lock_state".equals(action) || "set_emergency_passphrase".equals(action) || "add_locked_app".equals(action) || "remove_locked_app".equals(action) || "list_lockable_apps".equals(action);
     }
 
+
+    private static boolean isWalletAction(String action) {
+        return "get_wallet_state".equals(action) || "get_wallet_month_state".equals(action) || "list_wallet_months".equals(action) || "add_wallet_record".equals(action) || "list_wallet_pending".equals(action) || "list_wallet_approvals".equals(action) || "list_companion_wallet_requests".equals(action) || "list_wallet_request_results".equals(action) || "submit_wallet_approval".equals(action) || "submit_companion_wallet_request".equals(action) || "decide_wallet_approval".equals(action) || "save_wallet_request_result".equals(action) || "update_wallet_request_result".equals(action) || "save_user_wallet_request_result".equals(action) || "edit_wallet_record".equals(action) || "update_wallet_record".equals(action) || "delete_wallet_record".equals(action) || "remove_wallet_record".equals(action) || "confirm_wallet_record".equals(action) || "get_wallet_rules".equals(action) || "set_wallet_rules".equals(action) || "wallet_approval_request".equals(action);
+    }
+
+    private static boolean isTakeoutAction(String action) {
+        return "get_takeout_state".equals(action) || "list_takeout_cards".equals(action) || "list_takeout_meals".equals(action) || "remember_takeout_meal".equals(action) || "remember_current_takeout_meal".equals(action) || "set_takeout_budget".equals(action) || "set_takeout_preferences".equals(action) || "add_takeout_card".equals(action) || "save_takeout_card".equals(action) || "update_takeout_card".equals(action) || "remove_takeout_card".equals(action) || "delete_takeout_card".equals(action) || "suggest_takeout_options".equals(action) || "create_takeout_plan".equals(action) || "open_takeout_link".equals(action) || "open_takeout_plan".equals(action) || "copy_takeout_note".equals(action) || "record_takeout_order".equals(action) || "takeout_wallet_request".equals(action) || "prepare_takeout_checkout".equals(action) || "auto_takeout_checkout".equals(action) || "get_takeout_checkout_status".equals(action) || "cancel_takeout_checkout".equals(action);
+    }
+
     private static void executeCommand(Context ctx, String id, String action, String app, String pkg, float x, float y, float x1, float y1, float x2, float y2, long duration, int hour, int minute, String title, String message, boolean vibrate, String serverUrl, String token) {
         executeCommand(ctx, id, action, app, pkg, x, y, x1, y1, x2, y2, duration, hour, minute, title, message, vibrate, serverUrl, token, true, "", "", "contains", 1, false);
     }
@@ -262,6 +330,17 @@ public class CompanionService extends Service {
             ScreenshotService svc = ScreenshotService.getInstance();
             if ("wait".equals(action)) { ok = true; result = "wait";
             } else if ("get_life_state".equals(action)) { ok = true; result = LifeState.collect(ctx).toString();
+            } else if (isWalletAction(action)) { JSONObject rr = WalletState.handleCommand(ctx, new JSONObject().put("action", action).put("amount", 0)); ok = rr.optBoolean("ok", false); result = rr.toString();
+            } else if (isTakeoutAction(action)) { JSONObject rr = TakeoutState.handleCommand(ctx, new JSONObject().put("action", action)); ok = rr.optBoolean("ok", false); result = rr.toString();
+            } else if ("get_calendar_state".equals(action) || "upsert_calendar_event".equals(action) || "add_calendar_event".equals(action) || "delete_calendar_event".equals(action)) { JSONObject rr = CalendarState.handleCommand(ctx, new JSONObject().put("action", action).put("title", title).put("date", message)); ok = rr.optBoolean("ok", false); result = rr.optString("result", rr.toString());
+            } else if (FocusMode.isFocusAction(action)) {
+                JSONObject focusCmd = new JSONObject().put("action", action).put("app", app).put("package", pkg);
+                if (duration > 0 && duration != 350) focusCmd.put("duration_minutes", Math.max(1, Math.round(duration / 60000.0)));
+                if (message != null && message.trim().length() > 0) focusCmd.put("message", message);
+                if (title != null && title.trim().length() > 0) focusCmd.put("goal", title);
+                Context focusCtx = ScreenshotService.getInstance() != null ? ScreenshotService.getInstance() : ctx;
+                JSONObject rr = FocusMode.handleCommand(focusCtx, focusCmd); ok = rr.optBoolean("ok", false); result = rr.optString("result", rr.toString());
+                if (ok && ("start_focus_mode".equals(action) || "enable_focus_mode".equals(action))) FocusMode.forceShowLockActivity(focusCtx);
             } else if (isAppGateAction(action)) { JSONObject rr = AppGate.handleCommand(ctx, new JSONObject().put("action", normalizeGateAction(action)).put("app", app).put("package", pkg)); ok = rr.optBoolean("ok", false); result = rr.optString("result", rr.toString());
             } else if ("get_screen_nodes".equals(action)) {
                 if (svc != null) { svc.refreshScreenModel(); ok = true; result = svc.getScreenNodesJsonNow(); }
@@ -415,6 +494,21 @@ public class CompanionService extends Service {
     }
 
     public static boolean showReminderNotification(Context ctx, String title, String message) {
+        return showReminderNotification(ctx, title, message, (int)(System.currentTimeMillis() % Integer.MAX_VALUE));
+    }
+
+    public static boolean showHomeModeNotification(Context ctx, String title, String message) {
+        return showReminderNotification(ctx, title, message, HOME_MODE_NOTIFICATION_ID);
+    }
+
+    public static void cancelHomeModeNotification(Context ctx) {
+        try {
+            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) nm.cancel(HOME_MODE_NOTIFICATION_ID);
+        } catch (Exception ignored) { }
+    }
+
+    private static boolean showReminderNotification(Context ctx, String title, String message, int notificationId) {
         try {
             if (Build.VERSION.SDK_INT >= 33 && ctx.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) return false;
             NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -426,7 +520,7 @@ public class CompanionService extends Service {
             detail.putExtra("title", safeTitle);
             detail.putExtra("message", safeMessage);
             detail.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP | Intent.FLAG_ACTIVITY_SINGLE_TOP);
-            PendingIntent pi = PendingIntent.getActivity(ctx, (int)(System.currentTimeMillis() % 100000), detail, Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT : PendingIntent.FLAG_UPDATE_CURRENT);
+            PendingIntent pi = PendingIntent.getActivity(ctx, notificationId, detail, Build.VERSION.SDK_INT >= 23 ? PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT : PendingIntent.FLAG_UPDATE_CURRENT);
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 NotificationChannel channel = new NotificationChannel(REMINDER_CHANNEL_ID, "掌心窗悬浮横幅提醒", NotificationManager.IMPORTANCE_HIGH);
@@ -448,7 +542,7 @@ public class CompanionService extends Service {
                     .setWhen(System.currentTimeMillis())
                     .setShowWhen(true)
                     .build();
-            nm.notify((int)(System.currentTimeMillis() % Integer.MAX_VALUE), n);
+            nm.notify(notificationId, n);
             DebugState.append(ctx, "悬浮横幅通知已发送：" + safeTitle);
             return true;
         } catch (Exception e) { DebugState.append(ctx, "悬浮横幅通知异常：" + ScreenshotService.shortMsg(e)); return false; }
@@ -469,6 +563,14 @@ public class CompanionService extends Service {
         } catch (Exception e) { DebugState.append(ctx, "远程闹钟异常：" + ScreenshotService.shortMsg(e)); return false; }
     }
 
+    private static void notifyWalletUpdated(Context ctx) {
+        try {
+            Intent i = new Intent("dev.linjian.peek.WALLET_UPDATED");
+            i.setPackage(ctx.getPackageName());
+            ctx.sendBroadcast(i);
+        } catch (Exception ignored) { }
+    }
+
     private static void uploadStateThrottled(String serverUrl, String token, Context ctx, boolean force) throws Exception {
         if (ctx == null) return;
         long now = System.currentTimeMillis();
@@ -486,15 +588,44 @@ public class CompanionService extends Service {
     private static void reportCommand(Context ctx, String serverUrl, String token, String id, boolean ok, String result) throws Exception {
         if (id == null || id.length() == 0) return;
         JSONObject report = new JSONObject(); report.put("device_id", AppPrefs.device(ctx)); report.put("command_id", id); report.put("ok", ok); report.put("result", result);
+        SharedPreferences prefs = AppPrefs.get(ctx);
+        prefs.edit().putString(KEY_PENDING_COMMAND_REPORT, report.toString()).apply();
         postJson(serverUrl + "/api/device/report", token, report);
+        prefs.edit().remove(KEY_PENDING_COMMAND_REPORT).apply();
+    }
+
+    private static boolean flushPendingReport(Context ctx, String serverUrl, String token) {
+        if (ctx == null) return true;
+        SharedPreferences prefs = AppPrefs.get(ctx);
+        String raw = prefs.getString(KEY_PENDING_COMMAND_REPORT, "");
+        if (raw == null || raw.trim().isEmpty()) return true;
+        try {
+            postJson(serverUrl + "/api/device/report", token, new JSONObject(raw));
+            prefs.edit().remove(KEY_PENDING_COMMAND_REPORT).apply();
+            DebugState.append(ctx, "已补交上次手机命令的完成确认");
+            return true;
+        } catch (Exception e) {
+            DebugState.append(ctx, "手机命令完成确认待重试：" + ScreenshotService.shortMsg(e));
+            return false;
+        }
     }
 
     private static String postJson(String urlStr, String token, JSONObject obj) throws Exception {
-        HttpURLConnection conn = (HttpURLConnection)new URL(urlStr).openConnection(); conn.setRequestMethod("POST"); conn.setRequestProperty("Content-Type", "application/json; charset=utf-8"); conn.setRequestProperty("X-Auth-Token", token); conn.setDoOutput(true);
-        byte[] data = obj.toString().getBytes(StandardCharsets.UTF_8); try (OutputStream os = conn.getOutputStream()) { os.write(data); }
-        InputStream is = conn.getResponseCode() >= 400 ? conn.getErrorStream() : conn.getInputStream();
-        ByteArrayOutputStream bos = new ByteArrayOutputStream(); if (is != null) { byte[] buf = new byte[1024]; int n; while ((n = is.read(buf)) > 0) bos.write(buf,0,n); }
-        return new String(bos.toByteArray(), "UTF-8");
+        HttpURLConnection conn = (HttpURLConnection)new URL(urlStr).openConnection(); conn.setConnectTimeout(10000); conn.setReadTimeout(15000); conn.setRequestMethod("POST"); conn.setRequestProperty("Content-Type", "application/json; charset=utf-8"); conn.setRequestProperty("X-Auth-Token", token); conn.setDoOutput(true);
+        try {
+            byte[] data = obj.toString().getBytes(StandardCharsets.UTF_8); try (OutputStream os = conn.getOutputStream()) { os.write(data); }
+            int code = conn.getResponseCode();
+            InputStream is = code >= 400 ? conn.getErrorStream() : conn.getInputStream();
+            ByteArrayOutputStream bos = new ByteArrayOutputStream(); if (is != null) { byte[] buf = new byte[1024]; int n; while ((n = is.read(buf)) > 0) bos.write(buf,0,n); }
+            String body = new String(bos.toByteArray(), "UTF-8");
+            if (code == 429) {
+                long retryMs = registerRateLimit(conn.getHeaderField("Retry-After"));
+                throw new IOException("HTTP 429，已退避约 " + Math.max(1, retryMs / 1000) + " 秒");
+            }
+            if (code >= 200 && code < 300) clearRateLimit();
+            if (code >= 400) throw new IOException("HTTP " + code + " " + ScreenshotService.clip(body));
+            return body;
+        } finally { conn.disconnect(); }
     }
 
     private void createNotificationChannel() { if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) { NotificationManager nm = getSystemService(NotificationManager.class); NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "掌心窗", NotificationManager.IMPORTANCE_LOW); channel.setDescription("掌心窗正在等待你授权的截图与手机动作请求"); nm.createNotificationChannel(channel); NotificationChannel reminder = new NotificationChannel(REMINDER_CHANNEL_ID, "掌心窗悬浮横幅提醒", NotificationManager.IMPORTANCE_HIGH); reminder.setDescription("来自掌心窗的悬浮横幅、生活提醒与回家模式"); reminder.setLockscreenVisibility(Notification.VISIBILITY_PUBLIC); reminder.enableVibration(true); nm.createNotificationChannel(reminder); } }
