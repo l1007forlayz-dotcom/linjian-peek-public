@@ -59,7 +59,38 @@ const ACTIVITY_TIMEOUT_MS = Number(process.env.LINJIAN_ACTIVITY_TIMEOUT_MS || 18
 const COMMAND_QUEUE_TIMEOUT_MS = Number(process.env.LINJIAN_COMMAND_QUEUE_TIMEOUT_MS || 4500);
 const COMMAND_STATUS_TIMEOUT_MS = Number(process.env.LINJIAN_COMMAND_STATUS_TIMEOUT_MS || 1500);
 const DEFAULT_COMMAND_WAIT_SECONDS = Number(process.env.LINJIAN_DEFAULT_COMMAND_WAIT_SECONDS || 5);
-const MAX_TOOL_WAIT_SECONDS = Number(process.env.LINJIAN_MAX_TOOL_WAIT_SECONDS || 12);
+const MAX_TOOL_WAIT_SECONDS = Number(process.env.LINJIAN_MAX_TOOL_WAIT_SECONDS || 19);
+
+// Render free instances apply a much lower inbound-request ceiling than paid
+// instances.  One phone poller plus the old 700 ms command-status loop could
+// keep the backend permanently inside a rolling 429 window.  Keep one shared
+// circuit breaker so a single 429 cannot fan out into retries from every tool.
+let linjianRateLimitedUntil = 0;
+let linjianRateLimitStreak = 0;
+
+function retryAfterMs(value = "") {
+  const raw = String(value || "").trim();
+  if (raw) {
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds)) return Math.max(1000, seconds * 1000);
+    const at = Date.parse(raw);
+    if (Number.isFinite(at)) return Math.max(1000, at - Date.now());
+  }
+  return 0;
+}
+
+function enterLinjianRateLimit(retryAfter = "") {
+  linjianRateLimitStreak = Math.min(6, linjianRateLimitStreak + 1);
+  const exponential = Math.min(5 * 60_000, 15_000 * (2 ** (linjianRateLimitStreak - 1)));
+  const waitMs = Math.max(retryAfterMs(retryAfter), exponential);
+  linjianRateLimitedUntil = Math.max(linjianRateLimitedUntil, Date.now() + waitMs);
+  return waitMs;
+}
+
+function clearLinjianRateLimit() {
+  linjianRateLimitedUntil = 0;
+  linjianRateLimitStreak = 0;
+}
 
 const CARE_STATE_PATH = process.env.LINJIAN_CARE_STATE_PATH || path.join(process.cwd(), "care_state.json");
 const VISIT_STATE_PATH = process.env.LINJIAN_VISIT_STATE_PATH || path.join(process.cwd(), "visit_state.json");
@@ -740,8 +771,15 @@ async function linjianFetch(path, options = {}) {
   const { timeout_ms, retry_429, ...fetchOptions } = options || {};
   const timeoutMs = Math.max(500, Number(timeout_ms || DEFAULT_FETCH_TIMEOUT_MS));
   const method = String(fetchOptions.method || "GET").toUpperCase();
-  // 读请求遇到 Render/反代的短暂 429 时自动小幅退避重试；写请求默认不重试，避免重复下发手机动作。
-  const max429Retries = retry_429 === undefined ? (method === "GET" ? 2 : 0) : Math.max(0, Math.min(3, Number(retry_429) || 0));
+  // 默认不在同一次工具调用里重放 429。连续快速重试只会延长 Render
+  // 的滚动限流窗口；显式请求重试时也只允许一次，写请求仍不重试。
+  const max429Retries = method === "GET"
+    ? Math.max(0, Math.min(1, Number(retry_429) || 0))
+    : 0;
+  if (Date.now() < linjianRateLimitedUntil) {
+    const waitSeconds = Math.max(1, Math.ceil((linjianRateLimitedUntil - Date.now()) / 1000));
+    throw new Error(`LINJIAN_RATE_LIMITED: 掌心窗后端正在退避，约 ${waitSeconds} 秒后再试。`);
+  }
   for (const base of candidateOrder()) {
     for (let attempt = 0; attempt <= max429Retries; attempt++) {
       try {
@@ -755,18 +793,16 @@ async function linjianFetch(path, options = {}) {
           const text = await res.text().catch(() => "");
           if (res.status === 429) {
             const retryHeader = res.headers.get("retry-after") || "";
-            const retrySeconds = Number(retryHeader);
-            const waitMs = Number.isFinite(retrySeconds)
-              ? Math.max(700, Math.min(5000, retrySeconds * 1000))
-              : Math.min(5000, 900 + attempt * 900);
+            const waitMs = enterLinjianRateLimit(retryHeader);
             if (attempt < max429Retries) {
               await new Promise((resolve) => setTimeout(resolve, waitMs));
               continue;
             }
-            throw new Error(`LINJIAN_RATE_LIMITED: 掌心窗后端短暂限流，自动重试后仍未恢复。retry_after=${retryHeader || "unknown"} detail=${text || res.statusText}`);
+            throw new Error(`LINJIAN_RATE_LIMITED: 掌心窗后端触发限流，已停止追加请求并退避 ${Math.ceil(waitMs / 1000)} 秒。retry_after=${retryHeader || "unknown"} detail=${text || res.statusText}`);
           }
           throw new Error(`Linjian server HTTP ${res.status} via ${base}: ${text || res.statusText}`);
         }
+        clearLinjianRateLimit();
         return res;
       } catch (e) {
         const msg = String(e?.message || e);
@@ -852,12 +888,15 @@ async function waitCommand(id, seconds = DEFAULT_COMMAND_WAIT_SECONDS) {
   const waitSec = Math.max(0, Math.min(Number(seconds || 0), MAX_TOOL_WAIT_SECONDS));
   const deadline = Date.now() + waitSec * 1000;
   let last = null;
+  let delayMs = 1400;
   while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 700));
+    await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, Math.max(0, deadline - Date.now()))));
+    if (Date.now() >= deadline) break;
     const remain = Math.max(500, Math.min(COMMAND_STATUS_TIMEOUT_MS, deadline - Date.now()));
     last = await commandStatus(id, remain).catch(() => last);
     const status = last?.command?.status;
     if (status === "completed" || status === "failed") return last;
+    delayMs = Math.min(3200, delayMs + 600);
   }
   return last;
 }
@@ -1615,7 +1654,7 @@ function makeServer() {
 
   const diaryWaitFields = {
     device_id: z.string().default(DEFAULT_DEVICE),
-    wait_seconds: z.number().int().min(3).max(20).default(8)
+    wait_seconds: z.number().int().min(3).max(20).default(18)
   };
 
   server.tool("create_diary_book", "在手机本机创建一本“TA 的日记”。日记默认不上传云端；成功结果包含 book_id。", {
