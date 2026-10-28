@@ -1649,8 +1649,19 @@ function makeServer() {
     const command = observed?.command || null;
     let phone_result = null;
     try { phone_result = command?.result ? JSON.parse(command.result) : null; } catch { phone_result = command?.result || null; }
-    return { queued, command, phone_result };
+    return { queued, command_id: commandId || "", command, phone_result, pending: !!commandId && command?.status !== "completed" && command?.status !== "failed" };
   }
+
+  server.tool("get_diary_command_status", "继续查询已下发日记命令的手机确认，不会再创建命令。日记工具返回 pending 时，传回 command_id；只有 status=completed 且 phone_result.ok=true 才算成功。", {
+    command_id: z.string().min(1).max(100),
+    wait_seconds: z.number().int().min(0).max(20).default(8)
+  }, async ({ command_id, wait_seconds = 8 }) => {
+    const observed = wait_seconds > 0 ? await waitCommand(command_id, wait_seconds) : await commandStatus(command_id);
+    const command = observed?.command || null;
+    let phone_result = null;
+    try { phone_result = command?.result ? JSON.parse(command.result) : null; } catch { phone_result = command?.result || null; }
+    return textResult({ command_id, command, phone_result, pending: !!command && command.status !== "completed" && command.status !== "failed" });
+  });
 
   const diaryWaitFields = {
     device_id: z.string().default(DEFAULT_DEVICE),
@@ -1697,17 +1708,25 @@ function makeServer() {
     tags: z.array(z.string().max(30)).max(20).default([]), date: z.string().default(""), time_label: z.string().max(30).default(""), ...diaryWaitFields
   }, async ({ book_id, title, content, mood = "", tags = [], date = "", time_label = "", device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
     const result = await runDiaryCommand("write_diary_entry", { book_id, title, content, mood, tags, date, time_label }, device_id, wait_seconds);
-    await postCompanionAction("write_diary_entry", { summary: `写下日记「${title}」` });
-    return textResult({ ok: result.command?.status === "completed", action_done: `日记「${title}」已写入本机`, book_id, title, date, ...result });
+    if (result.command?.status === "completed") await postCompanionAction("write_diary_entry", { summary: `写下日记「${title}」` });
+    const ok = result.command?.status === "completed" && result.phone_result?.ok === true && !!result.phone_result?.entry_id;
+    const action_done = ok ? `日记「${title}」已写入本机` : result.pending ? `日记「${title}」仍在等待手机确认，请用 command_id 查询，不要重复提交` : `日记「${title}」未写入，请根据返回原因处理`;
+    return textResult({ ok, action_done, book_id, title, date, ...result });
   });
 
   server.tool("list_diary_entries", "按 book_id 列出本机日记，结果包含日期、标题、心情、标签及 entry_id。", {
     book_id: z.string().min(1).max(100), ...diaryWaitFields
-  }, async ({ book_id, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => textResult({ action_done: "已读取日记列表", book_id, ...(await runDiaryCommand("list_diary_entries", { book_id }, device_id, wait_seconds)) }));
+  }, async ({ book_id, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("list_diary_entries", { book_id }, device_id, wait_seconds);
+    return textResult({ action_done: result.command?.status === "completed" && result.phone_result?.ok === true ? "已读取日记列表" : "日记列表尚未读取；如为 pending，请用 command_id 查询", book_id, ...result });
+  });
 
   server.tool("read_diary_entry", "按 entry_id 读取一篇本机日记的完整正文。", {
     entry_id: z.string().min(1).max(100), ...diaryWaitFields
-  }, async ({ entry_id, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => textResult({ action_done: "已读取日记", entry_id, ...(await runDiaryCommand("read_diary_entry", { entry_id }, device_id, wait_seconds)) }));
+  }, async ({ entry_id, device_id = DEFAULT_DEVICE, wait_seconds = 8 }) => {
+    const result = await runDiaryCommand("read_diary_entry", { entry_id }, device_id, wait_seconds);
+    return textResult({ action_done: result.command?.status === "completed" && result.phone_result?.ok === true ? "已读取日记" : "日记尚未读取；如为 pending，请用 command_id 查询", entry_id, ...result });
+  });
 
   server.tool("search_diary_entries", "在一本本机日记中按标题、正文、标签、心情关键词和日期范围搜索。", {
     book_id: z.string().min(1).max(100), keyword: z.string().max(200).default(""), date_from: z.string().max(10).default(""), date_to: z.string().max(10).default(""),
@@ -2414,6 +2433,7 @@ app.get("/health", (_req, res) => res.json({
   fallback_linjian_urls: LINJIAN_URL_CANDIDATES.filter((u) => u !== RAW_LINJIAN_URL),
   guardian_day_tools: true,
   diary_tools: true,
+  diary_command_recovery: true,
   diary_rename_fix: true,
   diary_storage: "phone_local",
   focus_tools: true,
